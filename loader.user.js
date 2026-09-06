@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OctoLink Bypass Loader — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.0.0
+// @version      4.0.1
 // @description  Cổng nạp: xử lý chặng chuyển hướng ?redirect_to_octo trên miền đích, rồi nạp lõi octolink.js từ repo aozoracyrus/octolink-bypass (có cache + fallback jsDelivr).
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
@@ -101,7 +101,12 @@
   // ---- nạp lõi ----------------------------------------------------------
   function runCore(code) {
     try {
-      (0, eval)(code); // eval gián tiếp -> chạy ở global scope
+      // QUAN TRONG: eval TRỰC TIẾP (không (0,eval)) để lõi chạy trong scope
+      // wrapper của Violentmonkey — nơi có GM_xmlhttpRequest + @connect.
+      // Eval gián tiếp đẩy lõi ra global scope của trang -> mất GM API ->
+      // fetch thường bị CORS chặn ở octolink.vip (api.github.com vẫn sống
+      // vì GitHub có CORS) -> "Không với tới octolink.vip".
+      eval(code);
       console.info('[otl-loader] Đã nạp lõi octolink.js (' + Math.round(code.length / 1024) + 'KB).');
     } catch (e) {
       console.error('[otl-loader] Lỗi khi chạy lõi:', e);
@@ -157,7 +162,7 @@
         method: 'GET', url: LOADER_URL + '?t=' + Date.now(), timeout: 10000,
         onload: function (r) {
           var m = (r.responseText || '').match(/@version\s+([0-9.]+)/);
-          if (m && m[1] !== '4.0.0') {
+          if (m && m[1] !== '4.0.1') {
             console.warn('[otl-loader] Có bản mới ' + m[1] + ': ' + LOADER_URL);
             try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: 'Có bản mới ' + m[1] + ' — cập nhật trong Violentmonkey.', timeout: 8000 }); } catch (e) {}
           }
@@ -181,4 +186,3 @@
   checkLoaderUpdate();
   boot();
 })();
- 
