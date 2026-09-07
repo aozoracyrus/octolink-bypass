@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OctoLink Bypass Loader — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.3.0
+// @version      4.3.1
 // @description  Cổng nạp: xử lý chặng chuyển hướng ?redirect_to_octo trên miền đích, rồi nạp lõi octolink.js từ repo aozoracyrus/octolink-bypass (có cache + fallback jsDelivr).
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
@@ -16,9 +16,12 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_addStyle
 // @grant        GM_setClipboard
 // @grant        GM_notification
 // @grant        GM_registerMenuCommand
+// @grant        GM_getResourceText
+// @grant        GM_addElement
 // @grant        GM_openInTab
 // @connect      *
 // @connect      raw.githubusercontent.com
@@ -31,21 +34,6 @@
 // @updateURL    https://raw.githubusercontent.com/aozoracyrus/octolink-bypass/main/loader.user.js
 // ==/UserScript==
 
-/*
- * v4.0.0 — LOADER mỏng (fork aozoracyrus).
- *
- * Nhiệm vụ của file này (đúng kiến trúc bản gốc):
- *  1. Trên MIỀN ĐÍCH bất kì có ?redirect_to_octo=... : hiện màn hình
- *     "ĐANG ĐIỀU HƯỚNG TỐC ĐỘ CAO" rồi chuyển sang trang finish của
- *     octolink sau ~1s (chặng cuối của flow bypass).
- *  2. Trên các host hỗ trợ: nạp lõi octolink.js từ repo của bạn
- *     (raw.githubusercontent, fallback jsDelivr), cache vào GM storage
- *     để không fetch lại mỗi trang, rồi eval trong global scope.
- *  3. Tự kiểm tra cập nhật loader qua @version trên repo.
- *
- * Toàn bộ logic bypass (4 chặng /check/continue, live core, UI…) nằm ở
- * octolink.js — push CẢ HAI file lên nhánh main của repo.
- */
 (function () {
   'use strict';
 
@@ -72,129 +60,199 @@
     matchHost(currentHost, 'linkhuongdan.online') ||
     matchHost(currentHost, 'totreview.com');
   if (!isSupported) return;
+
+  // Trang captcha: KHÔNG nạp payload
+  if (matchHost(currentHost, 'octolink.vip') && /^\/+finish(\/|$)/i.test(window.location.pathname || '')) {
+    console.log('[Loader] Trang captcha — bo qua, khong nap script.');
+    return;
+  }
+
   if (window.__otlLoaderRunning) return;
   window.__otlLoaderRunning = true;
 
-  // QUAN TRONG: dùng /refs/heads/main/ — raw.githubusercontent bỏ qua query
-  // string khi tính cache key nên ?v=... không bust được cache /main/.
   var REPO_BASE = 'https://raw.githubusercontent.com/aozoracyrus/octolink-bypass/refs/heads/main/';
   var REPO_BASE_FB = 'https://cdn.jsdelivr.net/gh/aozoracyrus/octolink-bypass@main/';
-  var CORE_URL = REPO_BASE + 'octolink.js';
-  var CORE_URL_FB = REPO_BASE_FB + 'octolink.js';
+  var SCRIPT_URL = REPO_BASE + 'octolink.js';
+  var SCRIPT_URL_FB = REPO_BASE_FB + 'octolink.js';
   var LOADER_URL = REPO_BASE + 'loader.user.js';
 
-  var CORE_CACHE_KEY = 'otl_core_cache_v4';
-  var CORE_TS_KEY = 'otl_core_ts_v4';
-  var CORE_TTL = 10 * 60 * 1000; // 10 phút
+  var PAYLOAD_CACHE_KEY = 'otl_payload_cache_v4';
+  var PAYLOAD_TS_KEY = 'otl_payload_ts_v4';
+  var UPDATE_CHECK_KEY = 'otl_loader_update_check_v4';
+  var UPDATE_FOUND_KEY = 'otl_loader_update_found_v4';
+  var UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000;
 
   // ---- GM API ----------------------------------------------------------
-  function gm(n) { return (typeof GM !== 'undefined' && GM && typeof GM[n] === 'function') ? GM[n].bind(GM) : undefined; }
-  var req = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : gm('xmlHttpRequest');
-  var gGet = typeof GM_getValue === 'function' ? GM_getValue : gm('getValue');
-  var gSet = typeof GM_setValue === 'function' ? GM_setValue : gm('setValue');
-  var gNoti = typeof GM_notification === 'function' ? GM_notification : gm('notification');
-  var gMenu = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : gm('registerMenuCommand');
-  var gOpen = typeof GM_openInTab === 'function' ? GM_openInTab : gm('openInTab');
-  function storeGet(k, f) { try { var v = gGet ? gGet(k, f) : f; return (v == null) ? f : v; } catch (e) { return f; } }
-  function storeSet(k, v) { try { if (gSet) gSet(k, v); } catch (e) {} }
+  function modernApi(name) {
+    if (typeof GM !== 'undefined' && GM && typeof GM[name] === 'function') return GM[name].bind(GM);
+    return undefined;
+  }
 
-  // ---- nạp lõi ----------------------------------------------------------
-    function runCore(code) {
-    var apiNames = [
-      'GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM_setClipboard',
-      'GM_notification', 'GM_registerMenuCommand', 'GM_addStyle',
-      'GM_getResourceText', 'GM_addElement'
-    ];
-    var apiValues = [
-      typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : gm('xmlHttpRequest'),
-      typeof GM_getValue === 'function' ? GM_getValue : gm('getValue'),
-      typeof GM_setValue === 'function' ? GM_setValue : gm('setValue'),
-      typeof GM_setClipboard === 'function' ? GM_setClipboard : gm('setClipboard'),
-      typeof GM_notification === 'function' ? GM_notification : gm('notification'),
-      typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : gm('registerMenuCommand'),
-      typeof GM_addStyle === 'function' ? GM_addStyle : gm('addStyle'),
-      typeof GM_getResourceText === 'function' ? GM_getResourceText : gm('getResourceText'),
-      typeof GM_addElement === 'function' ? GM_addElement : gm('addElement')
-    ];
-    try {
-      var runner = Function.apply(null, apiNames.concat([code + '\n//# sourceURL=otl-octolink.js']));
-      runner.apply(window, apiValues);
-      console.info('[otl-loader] Đã nạp lõi octolink.js (' + Math.round(code.length / 1024) + 'KB).');
-    } catch (e) {
-      console.error('[otl-loader] Lỗi khi chạy lõi:', e);
+  var requestApi = typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : modernApi('xmlHttpRequest');
+  var getValueApi = typeof GM_getValue === 'function' ? GM_getValue : modernApi('getValue');
+  var setValueApi = typeof GM_setValue === 'function' ? GM_setValue : modernApi('setValue');
+  var notifyApi = typeof GM_notification === 'function' ? GM_notification : modernApi('notification');
+  var menuApi = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : modernApi('registerMenuCommand');
+  var openTabApi = typeof GM_openInTab === 'function' ? GM_openInTab : modernApi('openInTab');
+  var addStyleApi = typeof GM_addStyle === 'function' ? GM_addStyle : modernApi('addStyle');
+  var clipboardApi = typeof GM_setClipboard === 'function' ? GM_setClipboard : modernApi('setClipboard');
+  var resourceApi = typeof GM_getResourceText === 'function' ? GM_getResourceText : modernApi('getResourceText');
+  var addElementApi = typeof GM_addElement === 'function' ? GM_addElement : modernApi('addElement');
+
+  function storeGet(key, fallback) {
+    try { if (getValueApi) { var v = getValueApi(key, fallback); if (v !== undefined && v !== null) return v; } } catch (e) {}
+    return fallback;
+  }
+  function storeSet(key, value) { try { if (setValueApi) setValueApi(key, value); } catch (e) {} }
+
+  function currentVersion() {
+    try { if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) return String(GM_info.script.version || '0'); } catch (e) {}
+    return '0';
+  }
+  function compareVersion(a, b) {
+    var pa = String(a).split('.'), pb = String(b).split('.');
+    var len = Math.max(pa.length, pb.length);
+    for (var i = 0; i < len; i++) {
+      var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
+      if (x > y) return 1; if (x < y) return -1;
     }
- }
-  
-  function fetchCore(url, onSuccess, onFail) {
-    if (!req) { onFail(); return; }
-    try {
-      req({
-        method: 'GET', url: url, timeout: 15000,
-        onload: function (r) {
-          var code = r && r.responseText ? r.responseText : '';
-          // sanity: phải giống userscript/core hợp lệ
-          if (r.status === 200 && code.length > 1000 && code.indexOf('__otlBypassRunning') !== -1) onSuccess(code);
-          else onFail();
-        },
-        onerror: onFail, ontimeout: onFail
-      });
-    } catch (e) { onFail(); }
+    return 0;
   }
 
-  function boot() {
-    var cached = String(storeGet(CORE_CACHE_KEY, '') || '');
-    var ts = parseInt(storeGet(CORE_TS_KEY, 0), 10) || 0;
-    if (cached && Date.now() - ts < CORE_TTL) { runCore(cached); return; }
-
-    fetchCore(CORE_URL, function (code) {
-      storeSet(CORE_CACHE_KEY, code);
-      storeSet(CORE_TS_KEY, String(Date.now()));
-      runCore(code);
-    }, function () {
-      console.warn('[otl-loader] raw.githubusercontent lỗi — thử jsDelivr…');
-      fetchCore(CORE_URL_FB, function (code) {
-        storeSet(CORE_CACHE_KEY, code);
-        storeSet(CORE_TS_KEY, String(Date.now()));
-        runCore(code);
-      }, function () {
-        if (cached) { console.warn('[otl-loader] Dùng lõi cache cũ.'); runCore(cached); return; }
-        console.error('[otl-loader] Không nạp được octolink.js. Push file lên repo aozoracyrus/octolink-bypass.');
-      });
-    });
+  function openUpdatePage() {
+    try { if (openTabApi) { openTabApi(LOADER_URL, { active: true, insert: true }); return; } } catch (e) {}
+    try { window.open(LOADER_URL, '_blank'); } catch (e) {}
   }
 
-  // ---- tự cập nhật loader ----------------------------------------------
-  function checkLoaderUpdate() {
-    var last = parseInt(storeGet('otl_upd_ts_v4', 0), 10) || 0;
-    if (Date.now() - last < 6 * 3600 * 1000) return;
-    storeSet('otl_upd_ts_v4', String(Date.now()));
-    if (!req) return;
-    try {
-      req({
-        method: 'GET', url: LOADER_URL + '?t=' + Date.now(), timeout: 10000,
-        onload: function (r) {
-          var m = (r.responseText || '').match(/@version\s+([0-9.]+)/);
-          if (m && m[1] !== '4.3.0') {
-            console.warn('[otl-loader] Có bản mới ' + m[1] + ': ' + LOADER_URL);
-            try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: 'Có bản mới ' + m[1] + ' — cập nhật trong Violentmonkey.', timeout: 8000 }); } catch (e) {}
-          }
-        }
-      });
+  function announceUpdate(remote) {
+    var mine = currentVersion();
+    try { if (notifyApi) notifyApi({ title: 'OctoLink Bypass', text: 'Có bản mới ' + remote + ' (đang dùng ' + mine + ').', timeout: 12000, onclick: openUpdatePage }); } catch (e) {}
+    try { if (menuApi) menuApi('⬆ Cài bản mới ' + remote, openUpdatePage); } catch (e) {}
+  }
+
+  function checkLoaderUpdate(force) {
+    var now = Date.now();
+    if (!force) {
+      var last = parseInt(storeGet(UPDATE_CHECK_KEY, 0), 10) || 0;
+      if (now - last < UPDATE_CHECK_INTERVAL) {
+        var known = String(storeGet(UPDATE_FOUND_KEY, '') || '');
+        if (known && compareVersion(known, currentVersion()) > 0) announceUpdate(known);
+        return;
+      }
+    }
+    storeSet(UPDATE_CHECK_KEY, String(now));
+    function handleHeader(text) {
+      var match = String(text || '').match(/@version\s+([0-9][0-9.]*)/);
+      if (!match) return;
+      var remote = match[1];
+      if (compareVersion(remote, currentVersion()) > 0) { storeSet(UPDATE_FOUND_KEY, remote); announceUpdate(remote); }
+      else storeSet(UPDATE_FOUND_KEY, '');
+    }
+    var url = LOADER_URL + '?t=' + now;
+    if (requestApi) {
+      try {
+        requestApi({
+          method: 'GET', url: url, timeout: 15000,
+          headers: { Accept: 'text/plain, */*', 'Cache-Control': 'no-cache' },
+          onload: function (r) { if (r.status === 200) handleHeader(r.responseText); },
+          onerror: function () {}, ontimeout: function () {}
+        });
+        return;
+      } catch (e) {}
+    }
+  }
+
+  // Danh sách API sẽ được truyền vào payload (giống bản gốc)
+  var API_NAMES = [
+    'GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM_addStyle',
+    'GM_setClipboard', 'GM_notification', 'GM_registerMenuCommand',
+    'GM_getResourceText', 'GM_addElement'
+  ];
+  var API_VALUES = [
+    requestApi, getValueApi, setValueApi, addStyleApi, clipboardApi, notifyApi, menuApi, resourceApi, addElementApi
+  ];
+
+  function isValidPayload(source) {
+    return typeof source === 'string' &&
+           source.length >= 1000 &&
+           source.indexOf('var main = function') !== -1;
+  }
+
+  function executeSource(source) {
+    if (!isValidPayload(source)) throw new Error('Payload GitHub không hợp lệ');
+    // Chạy payload ở global scope, truyền GM API làm tham số
+    var runner = Function.apply(null, API_NAMES.concat([source + '\n//# sourceURL=otl-octolink.js']));
+    runner.apply(window, API_VALUES);
+  }
+
+  function cachePayload(source) {
+    if (!setValueApi || !isValidPayload(source)) return;
+    try { storeSet(PAYLOAD_CACHE_KEY, source); storeSet(PAYLOAD_TS_KEY, String(Date.now()));
+      console.log('[Loader] Đã lưu bản dự phòng (' + Math.round(source.length / 1024) + 'KB)');
     } catch (e) {}
   }
 
+  function runCachedPayload(reason) {
+    var cached = String(storeGet(PAYLOAD_CACHE_KEY, '') || '');
+    if (!isValidPayload(cached)) return false;
+    var ts = parseInt(storeGet(PAYLOAD_TS_KEY, 0), 10) || 0;
+    var ageHours = ts ? Math.round((Date.now() - ts) / 3600000) : -1;
+    console.warn('[Loader] ' + reason + ' → dùng bản dự phòng' + (ageHours >= 0 ? ' (lưu ' + ageHours + 'h trước)' : ''));
+    try { executeSource(cached); return true; } catch (e) { console.error('[Loader] Bản dự phòng lỗi:', e); return false; }
+  }
+
+  function loadWithFetch(url, onSuccess, onFailure) {
+    if (typeof fetch !== 'function') { onFailure(new Error('Không có API request tương thích')); return; }
+    fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit' })
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
+      .then(onSuccess).catch(onFailure);
+  }
+
+  function loadSource(attempt) {
+    var base = attempt >= 3 ? SCRIPT_URL_FB : SCRIPT_URL;
+    var url = base + '?t=' + Date.now() + '&attempt=' + attempt;
+    var settled = false;
+    function success(source, status) {
+      if (settled) return; settled = true;
+      try {
+        console.log('[Loader] HTTP status:', status || 200, '·', base);
+        executeSource(source);
+        console.log('[Loader] Loaded script (' + Math.round(source.length / 1024) + 'KB)');
+        cachePayload(source);
+      } catch (e) { window.__otlLoaderRunning = false; console.error('[Loader] Execute error:', e); }
+    }
+    function retry(err) {
+      if (settled) return; settled = true;
+      if (attempt >= 3) {
+        console.error('[Loader] Load failed after ' + attempt + ' attempts:', err);
+        if (!runCachedPayload('Tải payload thất bại')) window.__otlLoaderRunning = false;
+        return;
+      }
+      console.warn('[Loader] Retry ' + (attempt + 1) + '/3', err);
+      setTimeout(function () { loadSource(attempt + 1); }, 1500 * attempt);
+    }
+    if (!requestApi) { loadWithFetch(url, function (s) { success(s, 200); }, retry); return; }
+    try {
+      requestApi({
+        method: 'GET', url: url, timeout: 20000,
+        headers: { Accept: 'text/javascript, */*', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
+        onload: function (r) { if (r.status !== 200) { retry(new Error('HTTP ' + r.status)); return; } success(r.responseText, r.status); },
+        onerror: function (e) { retry(e || new Error('Network error')); },
+        ontimeout: function () { retry(new Error('Request timeout')); }
+      });
+    } catch (e) { loadWithFetch(url, function (s) { success(s, 200); }, retry); }
+  }
+
   try {
-    if (gMenu) {
-      gMenu('Xoá cache lõi (buộc tải lại octolink.js)', function () {
-        storeSet(CORE_CACHE_KEY, ''); storeSet(CORE_TS_KEY, '0');
-        try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: 'Đã xoá cache lõi — tải lại trang.', timeout: 4000 }); } catch (e) {}
+    if (menuApi) {
+      menuApi('Xoá cache lõi (buộc tải lại octolink.js)', function () {
+        storeSet(PAYLOAD_CACHE_KEY, ''); storeSet(PAYLOAD_TS_KEY, '0');
+        try { if (notifyApi) notifyApi({ title: 'OctoLink Bypass', text: 'Đã xoá cache lõi — tải lại trang.', timeout: 4000 }); } catch (e) {}
       });
-      gMenu('Mở trang cập nhật loader', function () {
-        try { if (gOpen) gOpen(LOADER_URL, { active: true }); else window.open(LOADER_URL, '_blank'); } catch (e) {}
-      });
+      menuApi('Kiểm tra cập nhật', function () { checkLoaderUpdate(true); });
     }
   } catch (e) {}
 
-  checkLoaderUpdate();
-  boot();
+  loadSource(1);
+  setTimeout(function () { checkLoaderUpdate(false); }, 4000);
 })();
