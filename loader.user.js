@@ -174,7 +174,7 @@
         method: 'GET', url: LOADER_URL + '?t=' + Date.now(), timeout: 10000,
         onload: function (r) {
           var m = (r.responseText || '').match(/@version\s+([0-9.]+)/);
-          if (m && m[1] !== '4.2.0') {
+          if (m && m[1] !== '4.3.0') {
             console.warn('[otl-loader] Có bản mới ' + m[1] + ': ' + LOADER_URL);
             try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: 'Có bản mới ' + m[1] + ' — cập nhật trong Violentmonkey.', timeout: 8000 }); } catch (e) {}
           }
