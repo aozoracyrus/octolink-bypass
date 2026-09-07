@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OctoLink Bypass Core — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.3.1
-// @description  Lõi bypass: giao thức 4 chặng /check/continue với LIVE CORE từ octolink.vip. Kiến trúc gốc: polyfills + Error override + qSA override ở top, main() chứa logic bypass, inject core vào top page sau khi có cookie phiên.
+// @version      4.3.2
+// @description  v4.3.2: thêm network diagnostics chi tiết để debug lỗi "jsconfig rỗng" — log mỗi GM_xmlhttpRequest với status/elapsed/body.
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
 // @match        *://linkhuongdan.online/*
@@ -25,20 +25,20 @@
 // ==/UserScript==
 
 // ====================================================================
-// THOÁT SỚM TRÊN TRANG CAPTCHA — octolink.vip/finish/...
+// THOÁT SỚM TRÊN TRANG CAPTCHA
 // ====================================================================
 try {
   var _h = String(window.location.hostname || '').toLowerCase();
   var _p = String(window.location.pathname || '');
   var _isOcto = _h === 'octolink.vip' || _h.slice(-13) === '.octolink.vip';
   if (_isOcto && /^\/+finish(\/|$)/i.test(_p)) {
-    console.log('[Octo] Trang captcha — script tự tắt để không cản việc giải captcha.');
+    console.log('[Octo] Trang captcha — script tự tắt.');
     return;
   }
 } catch (err) {}
 
 // ====================================================================
-// TOP-LEVEL SETUP: polyfill + lớp chống phát hiện (theo đúng kiến trúc gốc)
+// TOP-LEVEL SETUP: polyfill + lớp chống phát hiện
 // ====================================================================
 if (typeof window.TextEncoder === 'undefined') {
   window.TextEncoder = function () {
@@ -102,7 +102,7 @@ try {
 } catch (err) {}
 
 // ====================================================================
-// MAIN — logic bypass (payload marker để loader nhận dạng)
+// MAIN — payload marker
 // ====================================================================
 var main = function (
   GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_addStyle,
@@ -112,7 +112,7 @@ var main = function (
   if (window.__otlBypassRunning) return;
   window.__otlBypassRunning = true;
 
-  var MY_VERSION = '4.3.1';
+  var MY_VERSION = '4.3.2';
   var KEY_LAST = 'otl_last_target_v4';
   var RD_DEMO = 'Ym90Z3VhcmQtY29udGFjdEBnb29nbGUuY29t';
 
@@ -128,11 +128,53 @@ var main = function (
   }
   if (!isGuideHost && !isOcto) return;
 
-  // GM API helpers (dùng tham số được inject từ loader)
   function storeGet(k, f) { try { var v = GM_getValue ? GM_getValue(k, f) : f; return (v == null) ? f : v; } catch (e) { return f; } }
   function storeSet(k, v) { try { if (GM_setValue) GM_setValue(k, v); } catch (e) {} }
 
-  // safeRequest: GM_xmlhttpRequest wrapper với fetch fallback
+  // ==================================================================
+  // NETWORK DIAGNOSTICS — log mỗi GM_xmlhttpRequest (giống bản gốc)
+  // ==================================================================
+  var _reqCounter = 0;
+  var _origGM = GM_xmlhttpRequest;
+  function gmRequest(opts) {
+    var id = ++_reqCounter;
+    var url = opts.url || '?';
+    var method = (opts.method || 'GET').toUpperCase();
+    var t0 = Date.now();
+    var shortUrl = url.length > 80 ? url.substring(0, 77) + '...' : url;
+    console.log('[NET#' + id + '] → ' + method + ' ' + shortUrl);
+    var origOnload = opts.onload;
+    var origOnerror = opts.onerror;
+    var origOntimeout = opts.ontimeout;
+    opts.onload = function (resp) {
+      var elapsed = Date.now() - t0;
+      var status = resp.status || 0;
+      var bodyLen = (resp.responseText || '').length;
+      var lvl = status >= 400 ? 'warn' : 'log';
+      var msg = '[NET#' + id + '] ← ' + status + ' ' + elapsed + 'ms ' + bodyLen + 'B';
+      if (status >= 400) {
+        msg += '\n  Body(200): ' + (resp.responseText || '').substring(0, 200);
+        console.warn(msg);
+      } else {
+        console.log(msg);
+      }
+      if (origOnload) origOnload(resp);
+    };
+    opts.onerror = function (e) {
+      var elapsed = Date.now() - t0;
+      var errMsg = (e && (e.statusText || e.message || e.error)) || 'unknown';
+      console.error('[NET#' + id + '] ✕ ONERROR ' + elapsed + 'ms\n  URL: ' + shortUrl + '\n  Error: ' + errMsg + '\n  Hint: check DNS, firewall, VPN, hoặc octolink.vip bị chặn ở ISP');
+      if (origOnerror) origOnerror(e);
+    };
+    opts.ontimeout = function () {
+      var elapsed = Date.now() - t0;
+      var timeoutSec = ((opts.timeout || 0) / 1000);
+      console.error('[NET#' + id + '] ✕ TIMEOUT ' + elapsed + 'ms (limit ' + timeoutSec + 's)\n  URL: ' + shortUrl);
+      if (origOntimeout) origOntimeout();
+    };
+    return _origGM(opts);
+  }
+
   function safeRequest(opts) {
     var fired = false;
     var onLoad = opts.onload, onErr = opts.onerror, onTmo = opts.ontimeout;
@@ -154,8 +196,8 @@ var main = function (
       }).catch(function (err) { done(onErr, { statusText: 'fetch_failed: ' + (err.message || err) }); });
     }
     var safety = setTimeout(fallback, Math.max(timeout * 1.5, 12000));
-    if (typeof GM_xmlhttpRequest === 'function') {
-      try { GM_xmlhttpRequest(opts); } catch (e) { fallback(); }
+    if (typeof _origGM === 'function') {
+      try { gmRequest(opts); } catch (e) { fallback(); }
     } else fallback();
   }
 
@@ -171,7 +213,6 @@ var main = function (
     cookieHeader = pairs.join(';\x20') + (pairs.length ? ';\x20' : '');
   }
 
-  // Fingerprint + Spoof
   var REAL_UA = '';
   try { REAL_UA = String(navigator.userAgent || ''); } catch (e) {}
   var USER_AGENT = REAL_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
@@ -200,7 +241,6 @@ var main = function (
 
   var SEAL_SCRIPT = '(function(){function _sealCd(){try{var d=window.directjscd;if(!d||typeof d!=="object")return;try{if(d.userscript!==undefined)d.userscript=0;}catch(e){}try{if("userscript_score"in d&&d.userscript_score)d.userscript_score=0;}catch(e){}try{if(d.gm_apis)d.gm_apis=false;}catch(e){}try{if(d.extension_runtime)d.extension_runtime=false;}catch(e){}try{var lu=d.layered_userscript;if(lu&&typeof lu==="object"){if(lu.score)lu.score=0;if(Array.isArray(lu.detections)&&lu.detections.length)lu.detections=lu.detections.filter(function(x){return !/userscript|tampermonkey|greasemonkey|violentmonkey/i.test(String((x&&x.kind)||x.name||x));});}}catch(e){}try{var tm=d.timing;if(tm&&typeof tm==="object"&&tm.score&&tm.score>100)tm.score=0;}catch(e){}}catch(e){}}var _iv=setInterval(function(){if(typeof window.__b110671==="function"&&!window.__b110671.__sealed){var _o=window.__b110671;window.__b110671=function(){_sealCd();return _o();};try{Object.defineProperty(window.__b110671,"__sealed",{value:true});}catch(e){}clearInterval(_iv);}},80);})();';
 
-  // UI
   var UI = null;
   function initUI() {
     if (UI) return UI;
@@ -256,7 +296,6 @@ var main = function (
 
   function notify(t) { try { if (GM_notification) GM_notification({ title: 'OctoLink Bypass', text: t, timeout: 4000 }); } catch (e) {} }
 
-  // LIVE CORE
   var coreCtx = null;
   var lastProbe = 'chưa probe';
 
@@ -268,23 +307,59 @@ var main = function (
   }
 
   function probeDomainSession(done) {
+    UI.log('Đang probe phiên octolink.vip…', 'system');
     safeRequest({
       method: 'GET', url: 'https://octolink.vip/', timeout: 20000,
       headers: { accept: 'text/html,*/*', referer: 'https://www.google.com/', 'user-agent': USER_AGENT },
-      onload: function (r) { collectCookies(r.responseHeaders); UI.log('Phiên octolink: ' + (cookieHeader ? 'cookie OK' : 'KHÔNG có cookie'), cookieHeader ? 'success' : 'warn'); done(); },
-      onerror: function () { done(); },
-      ontimeout: function () { done(); }
+      onload: function (r) {
+        collectCookies(r.responseHeaders);
+        UI.log('Phiên octolink: status=' + r.status + ', cookie=' + (cookieHeader ? 'OK' : 'EMPTY'), r.status === 200 ? 'success' : 'warn');
+        done(r.status === 200);
+      },
+      onerror: function (e) {
+        UI.log('Phiên octolink: ONERROR ' + (e && e.statusText ? e.statusText : '?') + ' — kiểm tra mạng/VPN.', 'error');
+        done(false);
+      },
+      ontimeout: function () {
+        UI.log('Phiên octolink: TIMEOUT 20s — server không phản hồi.', 'error');
+        done(false);
+      }
     });
   }
 
   function fetchJsConfig(done) {
+    UI.log('Đang xin jsconfig.js từ octolink.vip…', 'system');
     var hdr = { accept: '*/*', referer: 'https://octolink.vip/', 'user-agent': USER_AGENT };
     if (cookieHeader) hdr.cookie = cookieHeader;
     safeRequest({
       method: 'GET', url: 'https://octolink.vip/statics/jsconfig.js', timeout: 20000, headers: hdr,
-      onload: function (resp) { collectCookies(resp.responseHeaders); done(readJsConfig(resp.responseText || '')); },
-      onerror: function () { done(null); },
-      ontimeout: function () { done(null); }
+      onload: function (resp) {
+        collectCookies(resp.responseHeaders);
+        var text = resp.responseText || '';
+        if (resp.status !== 200) {
+          UI.log('jsconfig: HTTP ' + resp.status + ' (không phải 200)', 'error');
+          return done(null);
+        }
+        if (text.length < 10) {
+          UI.log('jsconfig: body rỗng (' + text.length + 'B)', 'error');
+          return done(null);
+        }
+        var cfg = readJsConfig(text);
+        if (!cfg.rd) {
+          UI.log('jsconfig: parse fail (không tìm thấy var rd trong ' + text.length + 'B)', 'error');
+          return done(null);
+        }
+        UI.log('jsconfig: rd=' + cfg.rd.slice(0, 16) + '… nad=' + cfg.nad + (cfg.rd === RD_DEMO ? ' (RD DEMO!)' : ' (rd thật)'), cfg.rd === RD_DEMO ? 'warn' : 'detect');
+        done(cfg);
+      },
+      onerror: function (e) {
+        UI.log('jsconfig: ONERROR ' + (e && e.statusText ? e.statusText : '?') + ' — không với tới server.', 'error');
+        done(null);
+      },
+      ontimeout: function () {
+        UI.log('jsconfig: TIMEOUT 20s.', 'error');
+        done(null);
+      }
     });
   }
 
@@ -320,11 +395,12 @@ var main = function (
   function bootLiveCore(done) {
     UI.log('Khởi động siêu hệ thống…', 'system');
     UI.status('đang nạp core…', 'busy');
-    probeDomainSession(function () {
+    probeDomainSession(function (sessionOK) {
+      if (!sessionOK) { UI.log('Không thiết lập được phiên — dừng.', 'error'); return done(null); }
       fetchJsConfig(function (cfg) {
-        if (!cfg || !cfg.rd) { UI.log('Không với tới octolink.vip / jsconfig rỗng.', 'error'); return done(null); }
-        UI.log('jsconfig: rd=' + cfg.rd.slice(0, 16) + '… nad=' + cfg.nad + (cfg.rd === RD_DEMO ? ' (RD DEMO!)' : ' (rd thật)'), cfg.rd === RD_DEMO ? 'warn' : 'detect');
+        if (!cfg || !cfg.rd) return done(null);
         if (cfg.rd === RD_DEMO) {
+          UI.log('rd DEMO — probe lại phiên…', 'warn');
           probeDomainSession(function () {
             fetchJsConfig(function (cfg2) {
               if (cfg2 && cfg2.rd && cfg2.rd !== RD_DEMO) cfg = cfg2;
@@ -358,6 +434,7 @@ var main = function (
       onload: function (r) {
         collectCookies(r.responseHeaders);
         var src = r.responseText || '';
+        if (r.status !== 200) { UI.log('Core live: HTTP ' + r.status, 'error'); return done(null); }
         if (src.length < 200) { UI.log('Core live rỗng (' + src.length + 'B).', 'error'); return done(null); }
         UI.log('Đã nạp core live (' + Math.round(src.length / 1024) + 'KB) — inject top page.', 'success');
         try { addPageScript(src); } catch (e) { UI.log('Lỗi khi inject core: ' + (e && e.message ? e.message : e), 'error'); return done(null); }
@@ -378,12 +455,11 @@ var main = function (
           }
         });
       },
-      onerror: function () { UI.log('Không tải được shortearn.live.js.', 'error'); done(null); },
-      ontimeout: function () { UI.log('Hết hạn tải core.', 'error'); done(null); }
+      onerror: function (e) { UI.log('Core live: ONERROR ' + (e && e.statusText ? e.statusText : '?'), 'error'); done(null); },
+      ontimeout: function () { UI.log('Core live: TIMEOUT 20s.', 'error'); done(null); }
     });
   }
 
-  // GIAO THỨC
   function toBytes(input) {
     if (!input) return null;
     if (typeof input === 'string') {
@@ -463,7 +539,7 @@ var main = function (
         collectCookies(resp.responseHeaders);
         var cfg = readJsConfig(resp.responseText || '');
         if (cfg.rd) { coreCtx.rd = cfg.rd; try { w.rd = cfg.rd; } catch (e) {} UI.log('Mã hóa đã làm mới: ' + cfg.rd.slice(0, 16) + '…', 'success'); }
-        else UI.log('Không thể làm mới mã hóa, dùng giá trị cũ.', 'warn');
+        else UI.log('Không thể làm mới mã hóa.', 'warn');
         try { if (cfg.nad != null) w.nad = cfg.nad; if (cfg.dm) w.dm = cfg.dm; } catch (e) {}
         done(cfg);
       },
@@ -476,7 +552,7 @@ var main = function (
   function checkJob(targetUrl, attempt) {
     if (missionHalted || !coreCtx) return;
     var w = coreCtx.w;
-    if (attempt > 3) { UI.log('Tên miền lưu trữ đã hết hạn hoặc bị từ chối.', 'error'); return; }
+    if (attempt > 3) { UI.log('Tên miền lưu trữ đã hết hạn.', 'error'); return; }
     refreshConfig(w, function () {
       var payload;
       try { payload = w.__b110671(); } catch (e) { payload = null; }
@@ -527,8 +603,8 @@ var main = function (
   function sendContinue(targetUrl, step, attempt, waitRound) {
     if (missionHalted || !coreCtx) return;
     var w = coreCtx.w;
-    if (attempt > 3) { UI.log('Phát sinh lỗi vượt chặng ' + step + '. Tạm dừng.', 'error'); return; }
-    if (waitRound > 20) { UI.log('Server chờ mãi ở chặng ' + step + '. Tạm dừng.', 'error'); return; }
+    if (attempt > 3) { UI.log('Phát sinh lỗi vượt chặng ' + step + '.', 'error'); return; }
+    if (waitRound > 20) { UI.log('Server chờ mãi ở chặng ' + step + '.', 'error'); return; }
     var payload;
     try { payload = w.__b110671(); } catch (e) { payload = null; }
     if (!payload) { UI.log('Core không tạo được payload continue.', 'error'); return; }
