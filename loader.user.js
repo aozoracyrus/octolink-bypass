@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OctoLink Bypass Loader — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.2.0
+// @version      4.3.0
 // @description  Cổng nạp: xử lý chặng chuyển hướng ?redirect_to_octo trên miền đích, rồi nạp lõi octolink.js từ repo aozoracyrus/octolink-bypass (có cache + fallback jsDelivr).
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
@@ -99,20 +99,32 @@
   function storeSet(k, v) { try { if (gSet) gSet(k, v); } catch (e) {} }
 
   // ---- nạp lõi ----------------------------------------------------------
-  function runCore(code) {
+    function runCore(code) {
+    var apiNames = [
+      'GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM_setClipboard',
+      'GM_notification', 'GM_registerMenuCommand', 'GM_addStyle',
+      'GM_getResourceText', 'GM_addElement'
+    ];
+    var apiValues = [
+      typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest : gm('xmlHttpRequest'),
+      typeof GM_getValue === 'function' ? GM_getValue : gm('getValue'),
+      typeof GM_setValue === 'function' ? GM_setValue : gm('setValue'),
+      typeof GM_setClipboard === 'function' ? GM_setClipboard : gm('setClipboard'),
+      typeof GM_notification === 'function' ? GM_notification : gm('notification'),
+      typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : gm('registerMenuCommand'),
+      typeof GM_addStyle === 'function' ? GM_addStyle : gm('addStyle'),
+      typeof GM_getResourceText === 'function' ? GM_getResourceText : gm('getResourceText'),
+      typeof GM_addElement === 'function' ? GM_addElement : gm('addElement')
+    ];
     try {
-      // QUAN TRONG: eval TRỰC TIẾP (không (0,eval)) để lõi chạy trong scope
-      // wrapper của Violentmonkey — nơi có GM_xmlhttpRequest + @connect.
-      // Eval gián tiếp đẩy lõi ra global scope của trang -> mất GM API ->
-      // fetch thường bị CORS chặn ở octolink.vip (api.github.com vẫn sống
-      // vì GitHub có CORS) -> "Không với tới octolink.vip".
-      eval(code);
+      var runner = Function.apply(null, apiNames.concat([code + '\n//# sourceURL=otl-octolink.js']));
+      runner.apply(window, apiValues);
       console.info('[otl-loader] Đã nạp lõi octolink.js (' + Math.round(code.length / 1024) + 'KB).');
     } catch (e) {
       console.error('[otl-loader] Lỗi khi chạy lõi:', e);
     }
-  }
-
+ }
+  
   function fetchCore(url, onSuccess, onFail) {
     if (!req) { onFail(); return; }
     try {
