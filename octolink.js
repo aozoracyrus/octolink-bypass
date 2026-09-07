@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OctoLink Bypass Core — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.3.2
-// @description  v4.3.2: thêm network diagnostics chi tiết để debug lỗi "jsconfig rỗng" — log mỗi GM_xmlhttpRequest với status/elapsed/body.
+// @version      4.3.3
+// @description  v4.3.3: network diagnostics chi tiết hơn — check api.github.com trước, log GM_xmlhttpRequest availability, retry với backoff.
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
 // @match        *://linkhuongdan.online/*
@@ -38,7 +38,7 @@ try {
 } catch (err) {}
 
 // ====================================================================
-// TOP-LEVEL SETUP: polyfill + lớp chống phát hiện
+// TOP-LEVEL SETUP
 // ====================================================================
 if (typeof window.TextEncoder === 'undefined') {
   window.TextEncoder = function () {
@@ -102,7 +102,7 @@ try {
 } catch (err) {}
 
 // ====================================================================
-// MAIN — payload marker
+// MAIN
 // ====================================================================
 var main = function (
   GM_xmlhttpRequest, GM_getValue, GM_setValue, GM_addStyle,
@@ -112,7 +112,7 @@ var main = function (
   if (window.__otlBypassRunning) return;
   window.__otlBypassRunning = true;
 
-  var MY_VERSION = '4.3.2';
+  var MY_VERSION = '4.3.3';
   var KEY_LAST = 'otl_last_target_v4';
   var RD_DEMO = 'Ym90Z3VhcmQtY29udGFjdEBnb29nbGUuY29t';
 
@@ -132,10 +132,13 @@ var main = function (
   function storeSet(k, v) { try { if (GM_setValue) GM_setValue(k, v); } catch (e) {} }
 
   // ==================================================================
-  // NETWORK DIAGNOSTICS — log mỗi GM_xmlhttpRequest (giống bản gốc)
+  // NETWORK DIAGNOSTICS — log chi tiết
   // ==================================================================
   var _reqCounter = 0;
   var _origGM = GM_xmlhttpRequest;
+  var _hasGM = typeof _origGM === 'function';
+  console.log('[NET] GM_xmlhttpRequest available:', _hasGM);
+
   function gmRequest(opts) {
     var id = ++_reqCounter;
     var url = opts.url || '?';
@@ -163,7 +166,7 @@ var main = function (
     opts.onerror = function (e) {
       var elapsed = Date.now() - t0;
       var errMsg = (e && (e.statusText || e.message || e.error)) || 'unknown';
-      console.error('[NET#' + id + '] ✕ ONERROR ' + elapsed + 'ms\n  URL: ' + shortUrl + '\n  Error: ' + errMsg + '\n  Hint: check DNS, firewall, VPN, hoặc octolink.vip bị chặn ở ISP');
+      console.error('[NET#' + id + '] ✕ ONERROR ' + elapsed + 'ms\n  URL: ' + shortUrl + '\n  Error: ' + errMsg);
       if (origOnerror) origOnerror(e);
     };
     opts.ontimeout = function () {
@@ -185,20 +188,27 @@ var main = function (
     opts.ontimeout = function () { done(onTmo); };
     function fallback() {
       if (fired) return;
-      var fOpts = { method: opts.method || 'GET', headers: {} };
+      var fOpts = { method: opts.method || 'GET', headers: {}, mode: 'cors', credentials: 'omit' };
       if (opts.headers) for (var k in opts.headers) fOpts.headers[k] = opts.headers[k];
       if (opts.data) fOpts.body = opts.data;
+      console.log('[NET] → fetch fallback: ' + opts.url);
       window.fetch(opts.url, fOpts).then(function (resp) {
         return resp.text().then(function (txt) {
           done(onLoad, { status: resp.status, responseText: txt, response: txt,
             responseHeaders: Array.from(resp.headers.entries()).map(function (h) { return h[0] + ': ' + h[1]; }).join('\n') });
         });
-      }).catch(function (err) { done(onErr, { statusText: 'fetch_failed: ' + (err.message || err) }); });
+      }).catch(function (err) {
+        console.error('[NET] ✕ fetch failed: ' + (err.message || err));
+        done(onErr, { statusText: 'fetch_failed: ' + (err.message || err) });
+      });
     }
     var safety = setTimeout(fallback, Math.max(timeout * 1.5, 12000));
-    if (typeof _origGM === 'function') {
-      try { gmRequest(opts); } catch (e) { fallback(); }
-    } else fallback();
+    if (_hasGM) {
+      try { gmRequest(opts); } catch (e) { console.error('[NET] gmRequest threw:', e); fallback(); }
+    } else {
+      console.warn('[NET] No GM_xmlhttpRequest, using fetch only');
+      fallback();
+    }
   }
 
   var cookieJar = { from_google: 'true' }, cookieHeader = '';
@@ -306,18 +316,52 @@ var main = function (
     return { rd: str('rd') || '', dm: str('dm') || '', fk: str('fk'), fr: str('fr'), nad: bool('nad'), w1: num('w1'), w2: num('w2'), w3: num('w3'), ad: num('ad') };
   }
 
+  // ==================================================================
+  // NETWORK CHECK — thử api.github.com trước để xác nhận mạng OK
+  // ==================================================================
+  function checkNetwork(done) {
+    UI.log('Kiểm tra mạng → api.github.com…', 'system');
+    safeRequest({
+      method: 'GET', url: 'https://api.github.com/repos/octocat/Hello-World', timeout: 15000,
+      headers: { accept: 'application/json', 'user-agent': USER_AGENT },
+      onload: function (r) {
+        if (r.status === 200) {
+          UI.log('Mạng OK (api.github.com ' + r.status + ').', 'success');
+          done(true);
+        } else {
+          UI.log('api.github.com trả ' + r.status + ' — mạng có vấn đề.', 'warn');
+          done(false);
+        }
+      },
+      onerror: function (e) {
+        UI.log('Mạng FAIL: ' + (e && e.statusText ? e.statusText : '?') + ' — kiểm tra kết nối.', 'error');
+        done(false);
+      },
+      ontimeout: function () {
+        UI.log('Mạng TIMEOUT — server không phản hồi.', 'error');
+        done(false);
+      }
+    });
+  }
+
   function probeDomainSession(done) {
     UI.log('Đang probe phiên octolink.vip…', 'system');
     safeRequest({
       method: 'GET', url: 'https://octolink.vip/', timeout: 20000,
-      headers: { accept: 'text/html,*/*', referer: 'https://www.google.com/', 'user-agent': USER_AGENT },
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        referer: 'https://www.google.com/',
+        'user-agent': USER_AGENT,
+        'cache-control': 'no-cache'
+      },
       onload: function (r) {
         collectCookies(r.responseHeaders);
-        UI.log('Phiên octolink: status=' + r.status + ', cookie=' + (cookieHeader ? 'OK' : 'EMPTY'), r.status === 200 ? 'success' : 'warn');
+        UI.log('Phiên octolink: status=' + r.status + ', body=' + (r.responseText || '').length + 'B, cookie=' + (cookieHeader ? 'OK' : 'EMPTY'), r.status === 200 ? 'success' : 'warn');
         done(r.status === 200);
       },
       onerror: function (e) {
-        UI.log('Phiên octolink: ONERROR ' + (e && e.statusText ? e.statusText : '?') + ' — kiểm tra mạng/VPN.', 'error');
+        UI.log('Phiên octolink: ONERROR ' + (e && e.statusText ? e.statusText : '?'), 'error');
+        UI.log('→ octolink.vip có thể bị ISP/VPN chặn hoặc server down.', 'error');
         done(false);
       },
       ontimeout: function () {
@@ -328,8 +372,13 @@ var main = function (
   }
 
   function fetchJsConfig(done) {
-    UI.log('Đang xin jsconfig.js từ octolink.vip…', 'system');
-    var hdr = { accept: '*/*', referer: 'https://octolink.vip/', 'user-agent': USER_AGENT };
+    UI.log('Đang xin jsconfig.js…', 'system');
+    var hdr = {
+      accept: '*/*',
+      referer: 'https://octolink.vip/',
+      'user-agent': USER_AGENT,
+      'cache-control': 'no-cache'
+    };
     if (cookieHeader) hdr.cookie = cookieHeader;
     safeRequest({
       method: 'GET', url: 'https://octolink.vip/statics/jsconfig.js', timeout: 20000, headers: hdr,
@@ -337,7 +386,7 @@ var main = function (
         collectCookies(resp.responseHeaders);
         var text = resp.responseText || '';
         if (resp.status !== 200) {
-          UI.log('jsconfig: HTTP ' + resp.status + ' (không phải 200)', 'error');
+          UI.log('jsconfig: HTTP ' + resp.status, 'error');
           return done(null);
         }
         if (text.length < 10) {
@@ -346,14 +395,14 @@ var main = function (
         }
         var cfg = readJsConfig(text);
         if (!cfg.rd) {
-          UI.log('jsconfig: parse fail (không tìm thấy var rd trong ' + text.length + 'B)', 'error');
+          UI.log('jsconfig: parse fail (không tìm thấy var rd)', 'error');
           return done(null);
         }
         UI.log('jsconfig: rd=' + cfg.rd.slice(0, 16) + '… nad=' + cfg.nad + (cfg.rd === RD_DEMO ? ' (RD DEMO!)' : ' (rd thật)'), cfg.rd === RD_DEMO ? 'warn' : 'detect');
         done(cfg);
       },
       onerror: function (e) {
-        UI.log('jsconfig: ONERROR ' + (e && e.statusText ? e.statusText : '?') + ' — không với tới server.', 'error');
+        UI.log('jsconfig: ONERROR ' + (e && e.statusText ? e.statusText : '?'), 'error');
         done(null);
       },
       ontimeout: function () {
@@ -395,21 +444,34 @@ var main = function (
   function bootLiveCore(done) {
     UI.log('Khởi động siêu hệ thống…', 'system');
     UI.status('đang nạp core…', 'busy');
-    probeDomainSession(function (sessionOK) {
-      if (!sessionOK) { UI.log('Không thiết lập được phiên — dừng.', 'error'); return done(null); }
-      fetchJsConfig(function (cfg) {
-        if (!cfg || !cfg.rd) return done(null);
-        if (cfg.rd === RD_DEMO) {
-          UI.log('rd DEMO — probe lại phiên…', 'warn');
-          probeDomainSession(function () {
-            fetchJsConfig(function (cfg2) {
-              if (cfg2 && cfg2.rd && cfg2.rd !== RD_DEMO) cfg = cfg2;
-              injectCore(cfg, done);
-            });
-          });
-          return;
+
+    checkNetwork(function (networkOK) {
+      if (!networkOK) {
+        UI.log('Mạng không ổn định — dừng boot.', 'error');
+        return done(null);
+      }
+
+      probeDomainSession(function (sessionOK) {
+        if (!sessionOK) {
+          UI.log('Không thiết lập được phiên octolink — dừng.', 'error');
+          UI.log('→ Thử: (1) đổi mạng/VPN, (2) thử lại sau, (3) kiểm tra octolink.vip có đang hoạt động.', 'warn');
+          return done(null);
         }
-        injectCore(cfg, done);
+
+        fetchJsConfig(function (cfg) {
+          if (!cfg || !cfg.rd) return done(null);
+          if (cfg.rd === RD_DEMO) {
+            UI.log('rd DEMO — probe lại phiên…', 'warn');
+            probeDomainSession(function () {
+              fetchJsConfig(function (cfg2) {
+                if (cfg2 && cfg2.rd && cfg2.rd !== RD_DEMO) cfg = cfg2;
+                injectCore(cfg, done);
+              });
+            });
+            return;
+          }
+          injectCore(cfg, done);
+        });
       });
     });
   }
