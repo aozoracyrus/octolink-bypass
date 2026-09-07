@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OctoLink Bypass Loader — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.3.1
-// @description  Cổng nạp: xử lý chặng chuyển hướng ?redirect_to_octo trên miền đích, rồi nạp lõi octolink.js từ repo aozoracyrus/octolink-bypass (có cache + fallback jsDelivr).
+// @version      5.0.0
+// @description  Loader v5.0.0: theo đúng bản gốc - match tất cả domain, xử lý redirect trước
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
 // @match        *://linkhuongdan.online/*
@@ -23,68 +23,90 @@
 // @grant        GM_getResourceText
 // @grant        GM_addElement
 // @grant        GM_openInTab
+// @grant        GM.xmlHttpRequest
+// @grant        GM.getValue
+// @grant        GM.setValue
+// @grant        GM.addStyle
+// @grant        GM.setClipboard
+// @grant        GM.notification
+// @grant        GM.registerMenuCommand
+// @grant        GM.getResourceText
+// @grant        GM.addElement
+// @grant        GM.openInTab
 // @connect      *
 // @connect      raw.githubusercontent.com
 // @connect      cdn.jsdelivr.net
 // @connect      octolink.vip
 // @connect      api.github.com
 // @run-at       document-idle
-// @license      MIT
 // @downloadURL  https://raw.githubusercontent.com/aozoracyrus/octolink-bypass/main/loader.user.js
 // @updateURL    https://raw.githubusercontent.com/aozoracyrus/octolink-bypass/main/loader.user.js
+// @license      MIT
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  var currentHost = String(window.location.hostname || '').toLowerCase();
-
-  // ---- 1) chặng chuyển hướng trên miền đích ---------------------------
-  var redirectTarget = new URLSearchParams(window.location.search || '').get('redirect_to_octo');
-  if (redirectTarget && /^https?:\/\//i.test(redirectTarget)) {
-    try {
-      document.body.innerHTML =
-        '<div style="background:#0a0a0a;color:#e0e0e0;height:100vh;display:flex;flex-direction:column;' +
-        'align-items:center;justify-content:center;font-family:sans-serif;font-size:18px;text-align:center;padding:20px">' +
-        '🚀<br>ĐANG ĐIỀU HƯỚNG TỐC ĐỘ CAO<br><small>Xin vui lòng chờ trong giây lát…</small></div>';
-    } catch (e) {}
-    setTimeout(function () { try { window.location.href = redirectTarget; } catch (e) {} }, 1000);
-    return;
+  var currentHost = window.location.hostname;
+  var hasRedirectTarget = new URLSearchParams(window.location.search).has('redirect_to_octo');
+  
+  // QUAN TRONG: check redirect TRUOC, vi redirect handler chay tren MOI domain
+  if (hasRedirectTarget) {
+    var redirectTarget = new URLSearchParams(window.location.search).get('redirect_to_octo');
+    if (redirectTarget && /^https?:\/\//i.test(redirectTarget)) {
+      try {
+        document.body.innerHTML =
+          '<div style="background:#0a0a0a;color:#e0e0e0;height:100vh;display:flex;flex-direction:column;' +
+          'align-items:center;justify-content:center;font-family:sans-serif;font-size:18px;text-align:center;padding:20px">' +
+          '🚀<br>ĐANG ĐIỀU HƯỚNG TỐC ĐỘ CAO<br><small>Xin vui lòng chờ trong giây lát…</small></div>';
+      } catch (e) {}
+      setTimeout(function () {
+        try { window.location.href = redirectTarget; } catch (e) {}
+      }, 1000);
+      return;
+    }
   }
 
-  // ---- 2) chỉ nạp lõi trên host hỗ trợ --------------------------------
-  function matchHost(h, d) { return h === d || (h.length > d.length && h.slice(-(d.length + 1)) === '.' + d); }
-  var isSupported =
-    matchHost(currentHost, 'octolink.vip') ||
-    matchHost(currentHost, 'minuc.vn') ||
-    matchHost(currentHost, 'linkhuongdan.online') ||
-    matchHost(currentHost, 'totreview.com');
-  if (!isSupported) return;
+  var isSupportedHost =
+    currentHost === 'minuc.vn' ||
+    currentHost.endsWith('.minuc.vn') ||
+    currentHost === 'linkhuongdan.online' ||
+    currentHost.endsWith('.linkhuongdan.online') ||
+    currentHost === 'totreview.com' ||
+    currentHost.endsWith('.totreview.com') ||
+    currentHost === 'octolink.vip' ||
+    currentHost.endsWith('.octolink.vip');
 
-  // Trang captcha: KHÔNG nạp payload
-  if (matchHost(currentHost, 'octolink.vip') && /^\/+finish(\/|$)/i.test(window.location.pathname || '')) {
+  if (!isSupportedHost) return;
+
+  if (
+    (currentHost === 'octolink.vip' || currentHost.endsWith('.octolink.vip')) &&
+    /^\/+finish(\/|$)/i.test(window.location.pathname || '')
+  ) {
     console.log('[Loader] Trang captcha — bo qua, khong nap script.');
     return;
   }
-
   if (window.__otlLoaderRunning) return;
   window.__otlLoaderRunning = true;
 
   var REPO_BASE = 'https://raw.githubusercontent.com/aozoracyrus/octolink-bypass/refs/heads/main/';
-  var REPO_BASE_FB = 'https://cdn.jsdelivr.net/gh/aozoracyrus/octolink-bypass@main/';
+  var REPO_BASE_FALLBACK = 'https://cdn.jsdelivr.net/gh/aozoracyrus/octolink-bypass@main/';
   var SCRIPT_URL = REPO_BASE + 'octolink.js';
-  var SCRIPT_URL_FB = REPO_BASE_FB + 'octolink.js';
+  var SCRIPT_URL_FALLBACK = REPO_BASE_FALLBACK + 'octolink.js';
   var LOADER_URL = REPO_BASE + 'loader.user.js';
+  var MAX_ATTEMPTS = 3;
+  var RETRY_DELAY = 1500;
 
-  var PAYLOAD_CACHE_KEY = 'otl_payload_cache_v4';
-  var PAYLOAD_TS_KEY = 'otl_payload_ts_v4';
-  var UPDATE_CHECK_KEY = 'otl_loader_update_check_v4';
-  var UPDATE_FOUND_KEY = 'otl_loader_update_found_v4';
+  var PAYLOAD_CACHE_KEY = 'otl_payload_cache_v5';
+  var PAYLOAD_TS_KEY = 'otl_payload_ts_v5';
+  var UPDATE_CHECK_KEY = 'otl_loader_update_check_v5';
+  var UPDATE_FOUND_KEY = 'otl_loader_update_found_v5';
   var UPDATE_CHECK_INTERVAL = 6 * 3600 * 1000;
 
-  // ---- GM API ----------------------------------------------------------
   function modernApi(name) {
-    if (typeof GM !== 'undefined' && GM && typeof GM[name] === 'function') return GM[name].bind(GM);
+    if (typeof GM !== 'undefined' && GM && typeof GM[name] === 'function') {
+      return GM[name].bind(GM);
+    }
     return undefined;
   }
 
@@ -94,40 +116,77 @@
   var notifyApi = typeof GM_notification === 'function' ? GM_notification : modernApi('notification');
   var menuApi = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : modernApi('registerMenuCommand');
   var openTabApi = typeof GM_openInTab === 'function' ? GM_openInTab : modernApi('openInTab');
-  var addStyleApi = typeof GM_addStyle === 'function' ? GM_addStyle : modernApi('addStyle');
-  var clipboardApi = typeof GM_setClipboard === 'function' ? GM_setClipboard : modernApi('setClipboard');
-  var resourceApi = typeof GM_getResourceText === 'function' ? GM_getResourceText : modernApi('getResourceText');
-  var addElementApi = typeof GM_addElement === 'function' ? GM_addElement : modernApi('addElement');
 
   function storeGet(key, fallback) {
-    try { if (getValueApi) { var v = getValueApi(key, fallback); if (v !== undefined && v !== null) return v; } } catch (e) {}
+    try {
+      if (getValueApi) {
+        var v = getValueApi(key, fallback);
+        if (v !== undefined && v !== null) return v;
+      }
+    } catch (error) {}
     return fallback;
   }
-  function storeSet(key, value) { try { if (setValueApi) setValueApi(key, value); } catch (e) {} }
+
+  function storeSet(key, value) {
+    try {
+      if (setValueApi) setValueApi(key, value);
+    } catch (error) {}
+  }
 
   function currentVersion() {
-    try { if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) return String(GM_info.script.version || '0'); } catch (e) {}
+    try {
+      if (typeof GM_info !== 'undefined' && GM_info && GM_info.script) {
+        return String(GM_info.script.version || '0');
+      }
+    } catch (error) {}
     return '0';
   }
+
   function compareVersion(a, b) {
-    var pa = String(a).split('.'), pb = String(b).split('.');
+    var pa = String(a).split('.');
+    var pb = String(b).split('.');
     var len = Math.max(pa.length, pb.length);
     for (var i = 0; i < len; i++) {
-      var x = parseInt(pa[i], 10) || 0, y = parseInt(pb[i], 10) || 0;
-      if (x > y) return 1; if (x < y) return -1;
+      var x = parseInt(pa[i], 10) || 0;
+      var y = parseInt(pb[i], 10) || 0;
+      if (x > y) return 1;
+      if (x < y) return -1;
     }
     return 0;
   }
 
   function openUpdatePage() {
-    try { if (openTabApi) { openTabApi(LOADER_URL, { active: true, insert: true }); return; } } catch (e) {}
-    try { window.open(LOADER_URL, '_blank'); } catch (e) {}
+    try {
+      if (openTabApi) {
+        openTabApi(LOADER_URL, { active: true, insert: true });
+        return;
+      }
+    } catch (error) {}
+    try {
+      window.open(LOADER_URL, '_blank');
+    } catch (error) {
+      console.warn('[Loader] Khong mo duoc trang cap nhat: ' + LOADER_URL);
+    }
   }
 
-  function announceUpdate(remote) {
+  function announceUpdate(remoteVersion) {
     var mine = currentVersion();
-    try { if (notifyApi) notifyApi({ title: 'OctoLink Bypass', text: 'Có bản mới ' + remote + ' (đang dùng ' + mine + ').', timeout: 12000, onclick: openUpdatePage }); } catch (e) {}
-    try { if (menuApi) menuApi('⬆ Cài bản mới ' + remote, openUpdatePage); } catch (e) {}
+    console.warn('[Loader] Co ban moi: ' + mine + ' → ' + remoteVersion + '. ' + LOADER_URL);
+    try {
+      if (notifyApi) {
+        notifyApi({
+          title: 'OctoLink Bypass',
+          text: 'Co ban cap nhat ' + remoteVersion + ' (dang dung ' + mine + '). Bam de cai.',
+          timeout: 12000,
+          onclick: openUpdatePage
+        });
+      }
+    } catch (error) {}
+    try {
+      if (menuApi) {
+        menuApi('⬆ Cai ban moi ' + remoteVersion, openUpdatePage);
+      }
+    } catch (error) {}
   }
 
   function checkLoaderUpdate(force) {
@@ -141,55 +200,98 @@
       }
     }
     storeSet(UPDATE_CHECK_KEY, String(now));
+
     function handleHeader(text) {
       var match = String(text || '').match(/@version\s+([0-9][0-9.]*)/);
       if (!match) return;
       var remote = match[1];
-      if (compareVersion(remote, currentVersion()) > 0) { storeSet(UPDATE_FOUND_KEY, remote); announceUpdate(remote); }
-      else storeSet(UPDATE_FOUND_KEY, '');
+      if (compareVersion(remote, currentVersion()) > 0) {
+        storeSet(UPDATE_FOUND_KEY, remote);
+        announceUpdate(remote);
+      } else {
+        storeSet(UPDATE_FOUND_KEY, '');
+        if (force) console.log('[Loader] Dang dung ban moi nhat (' + currentVersion() + ').');
+      }
     }
+
     var url = LOADER_URL + '?t=' + now;
     if (requestApi) {
       try {
         requestApi({
-          method: 'GET', url: url, timeout: 15000,
+          method: 'GET',
+          url: url,
+          timeout: 15000,
           headers: { Accept: 'text/plain, */*', 'Cache-Control': 'no-cache' },
-          onload: function (r) { if (r.status === 200) handleHeader(r.responseText); },
-          onerror: function () {}, ontimeout: function () {}
+          onload: function (response) {
+            if (response.status === 200) handleHeader(response.responseText);
+          },
+          onerror: function () {},
+          ontimeout: function () {}
         });
         return;
-      } catch (e) {}
+      } catch (error) {}
+    }
+    if (typeof fetch === 'function') {
+      fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit' })
+        .then(function (response) {
+          return response.ok ? response.text() : '';
+        })
+        .then(handleHeader)
+        .catch(function () {});
     }
   }
 
-  // Danh sách API sẽ được truyền vào payload (giống bản gốc)
-  var API_NAMES = [
-    'GM_xmlhttpRequest', 'GM_getValue', 'GM_setValue', 'GM_addStyle',
-    'GM_setClipboard', 'GM_notification', 'GM_registerMenuCommand',
-    'GM_getResourceText', 'GM_addElement'
+  var apiNames = [
+    'GM_xmlhttpRequest',
+    'GM_getValue',
+    'GM_setValue',
+    'GM_addStyle',
+    'GM_setClipboard',
+    'GM_notification',
+    'GM_registerMenuCommand',
+    'GM_getResourceText',
+    'GM_addElement'
   ];
-  var API_VALUES = [
-    requestApi, getValueApi, setValueApi, addStyleApi, clipboardApi, notifyApi, menuApi, resourceApi, addElementApi
+
+  var apiValues = [
+    requestApi,
+    getValueApi,
+    setValueApi,
+    typeof GM_addStyle === 'function' ? GM_addStyle : modernApi('addStyle'),
+    typeof GM_setClipboard === 'function' ? GM_setClipboard : modernApi('setClipboard'),
+    notifyApi,
+    menuApi,
+    typeof GM_getResourceText === 'function' ? GM_getResourceText : modernApi('getResourceText'),
+    typeof GM_addElement === 'function' ? GM_addElement : modernApi('addElement')
   ];
 
   function isValidPayload(source) {
-    return typeof source === 'string' &&
-           source.length >= 1000 &&
-           source.indexOf('var main = function') !== -1;
+    return (
+      typeof source === 'string' &&
+      source.length >= 1000 &&
+      source.indexOf('var main = function') !== -1
+    );
   }
 
   function executeSource(source) {
-    if (!isValidPayload(source)) throw new Error('Payload GitHub không hợp lệ');
-    // Chạy payload ở global scope, truyền GM API làm tham số
-    var runner = Function.apply(null, API_NAMES.concat([source + '\n//# sourceURL=otl-octolink.js']));
-    runner.apply(window, API_VALUES);
+    if (!isValidPayload(source)) {
+      throw new Error('Payload GitHub khong hop le');
+    }
+    var runner = Function.apply(null, apiNames.concat(source + '\n//# sourceURL=otl-octolink.js'));
+    runner.apply(window, apiValues);
   }
 
   function cachePayload(source) {
     if (!setValueApi || !isValidPayload(source)) return;
-    try { storeSet(PAYLOAD_CACHE_KEY, source); storeSet(PAYLOAD_TS_KEY, String(Date.now()));
-      console.log('[Loader] Đã lưu bản dự phòng (' + Math.round(source.length / 1024) + 'KB)');
-    } catch (e) {}
+    try {
+      if (storeGet(PAYLOAD_CACHE_KEY, '') === source) {
+        storeSet(PAYLOAD_TS_KEY, String(Date.now()));
+        return;
+      }
+      storeSet(PAYLOAD_CACHE_KEY, source);
+      storeSet(PAYLOAD_TS_KEY, String(Date.now()));
+      console.log('[Loader] Da luu ban du phong (' + Math.round(source.length / 1024) + 'KB)');
+    } catch (error) {}
   }
 
   function runCachedPayload(reason) {
@@ -197,62 +299,128 @@
     if (!isValidPayload(cached)) return false;
     var ts = parseInt(storeGet(PAYLOAD_TS_KEY, 0), 10) || 0;
     var ageHours = ts ? Math.round((Date.now() - ts) / 3600000) : -1;
-    console.warn('[Loader] ' + reason + ' → dùng bản dự phòng' + (ageHours >= 0 ? ' (lưu ' + ageHours + 'h trước)' : ''));
-    try { executeSource(cached); return true; } catch (e) { console.error('[Loader] Bản dự phòng lỗi:', e); return false; }
+    console.warn('[Loader] ' + reason + ' → dung ban du phong' + (ageHours >= 0 ? ' (luu ' + ageHours + 'h truoc)' : ''));
+    try {
+      executeSource(cached);
+      return true;
+    } catch (error) {
+      console.error('[Loader] Ban du phong loi:', error);
+      return false;
+    }
   }
 
   function loadWithFetch(url, onSuccess, onFailure) {
-    if (typeof fetch !== 'function') { onFailure(new Error('Không có API request tương thích')); return; }
+    if (typeof fetch !== 'function') {
+      onFailure(new Error('Khong co API request tuong thich'));
+      return;
+    }
     fetch(url, { method: 'GET', cache: 'no-store', credentials: 'omit' })
-      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })
-      .then(onSuccess).catch(onFailure);
+      .then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.text();
+      })
+      .then(onSuccess)
+      .catch(onFailure);
   }
 
   function loadSource(attempt) {
-    var base = attempt >= 3 ? SCRIPT_URL_FB : SCRIPT_URL;
+    var base = attempt >= 3 ? SCRIPT_URL_FALLBACK : SCRIPT_URL;
     var url = base + '?t=' + Date.now() + '&attempt=' + attempt;
     var settled = false;
+
     function success(source, status) {
-      if (settled) return; settled = true;
+      if (settled) return;
+      settled = true;
       try {
         console.log('[Loader] HTTP status:', status || 200, '·', base);
         executeSource(source);
         console.log('[Loader] Loaded script (' + Math.round(source.length / 1024) + 'KB)');
         cachePayload(source);
-      } catch (e) { window.__otlLoaderRunning = false; console.error('[Loader] Execute error:', e); }
+      } catch (error) {
+        window.__otlLoaderRunning = false;
+        console.error('[Loader] Execute error:', error);
+      }
     }
-    function retry(err) {
-      if (settled) return; settled = true;
-      if (attempt >= 3) {
-        console.error('[Loader] Load failed after ' + attempt + ' attempts:', err);
-        if (!runCachedPayload('Tải payload thất bại')) window.__otlLoaderRunning = false;
+
+    function retry(error) {
+      if (settled) return;
+      settled = true;
+      if (attempt >= MAX_ATTEMPTS) {
+        console.error('[Loader] Load failed after ' + attempt + ' attempts:', error);
+        if (!runCachedPayload('Tai payload that bai')) {
+          window.__otlLoaderRunning = false;
+        }
         return;
       }
-      console.warn('[Loader] Retry ' + (attempt + 1) + '/3', err);
-      setTimeout(function () { loadSource(attempt + 1); }, 1500 * attempt);
+      console.warn('[Loader] Retry ' + (attempt + 1) + '/' + MAX_ATTEMPTS, error);
+      setTimeout(function () {
+        loadSource(attempt + 1);
+      }, RETRY_DELAY * attempt);
     }
-    if (!requestApi) { loadWithFetch(url, function (s) { success(s, 200); }, retry); return; }
+
+    if (!requestApi) {
+      loadWithFetch(url, function (source) { success(source, 200); }, retry);
+      return;
+    }
+
     try {
-      requestApi({
-        method: 'GET', url: url, timeout: 20000,
-        headers: { Accept: 'text/javascript, */*', 'Cache-Control': 'no-cache', Pragma: 'no-cache' },
-        onload: function (r) { if (r.status !== 200) { retry(new Error('HTTP ' + r.status)); return; } success(r.responseText, r.status); },
-        onerror: function (e) { retry(e || new Error('Network error')); },
-        ontimeout: function () { retry(new Error('Request timeout')); }
+      var requestResult = requestApi({
+        method: 'GET',
+        url: url,
+        timeout: 20000,
+        headers: {
+          Accept: 'text/javascript, */*',
+          'Cache-Control': 'no-cache',
+          Pragma: 'no-cache'
+        },
+        onload: function (response) {
+          if (response.status !== 200) {
+            retry(new Error('HTTP ' + response.status));
+            return;
+          }
+          success(response.responseText, response.status);
+        },
+        onerror: function (error) {
+          retry(error || new Error('Network error'));
+        },
+        ontimeout: function () {
+          retry(new Error('Request timeout'));
+        }
       });
-    } catch (e) { loadWithFetch(url, function (s) { success(s, 200); }, retry); }
+
+      if (requestResult && typeof requestResult.then === 'function') {
+        requestResult
+          .then(function (response) {
+            if (settled || !response) return;
+            if (response.status !== 200) {
+              retry(new Error('HTTP ' + response.status));
+              return;
+            }
+            success(response.responseText, response.status);
+          })
+          .catch(retry);
+      }
+    } catch (error) {
+      loadWithFetch(url, function (source) { success(source, 200); }, retry);
+    }
   }
 
   try {
     if (menuApi) {
-      menuApi('Xoá cache lõi (buộc tải lại octolink.js)', function () {
-        storeSet(PAYLOAD_CACHE_KEY, ''); storeSet(PAYLOAD_TS_KEY, '0');
-        try { if (notifyApi) notifyApi({ title: 'OctoLink Bypass', text: 'Đã xoá cache lõi — tải lại trang.', timeout: 4000 }); } catch (e) {}
+      menuApi('Xoa cache loi (buoc tai lai octolink.js)', function () {
+        storeSet(PAYLOAD_CACHE_KEY, '');
+        storeSet(PAYLOAD_TS_KEY, '0');
+        try { if (notifyApi) notifyApi({ title: 'OctoLink Bypass', text: 'Da xoa cache loi — tai lai trang.', timeout: 4000 }); } catch (e) {}
       });
-      menuApi('Kiểm tra cập nhật', function () { checkLoaderUpdate(true); });
+      menuApi('Kiem tra cap nhat', function () {
+        console.log('[Loader] Dang kiem tra cap nhat...');
+        checkLoaderUpdate(true);
+      });
     }
-  } catch (e) {}
+  } catch (error) {}
 
   loadSource(1);
-  setTimeout(function () { checkLoaderUpdate(false); }, 4000);
+  setTimeout(function () {
+    checkLoaderUpdate(false);
+  }, 4000);
 })();
