@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OctoLink Bypass Loader — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.1.0
+// @version      4.1.1
 // @description  Cổng nạp: xử lý chặng chuyển hướng ?redirect_to_octo trên miền đích, rồi nạp lõi octolink.js từ repo aozoracyrus/octolink-bypass (có cache + fallback jsDelivr).
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
@@ -162,7 +162,7 @@
         method: 'GET', url: LOADER_URL + '?t=' + Date.now(), timeout: 10000,
         onload: function (r) {
           var m = (r.responseText || '').match(/@version\s+([0-9.]+)/);
-          if (m && m[1] !== '4.1.0') {
+          if (m && m[1] !== '4.1.1') {
             console.warn('[otl-loader] Có bản mới ' + m[1] + ': ' + LOADER_URL);
             try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: 'Có bản mới ' + m[1] + ' — cập nhật trong Violentmonkey.', timeout: 8000 }); } catch (e) {}
           }
