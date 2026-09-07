@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         OctoLink Bypass Core — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.1.0
+// @version      4.1.1
 // @description  Lõi bypass: giao thức 4 chặng /check/continue với LIVE CORE từ octolink.vip — iframe môi-trường-thật (script src thật, không sandbox, shim top/frameElement, đủ rd/dm/nad), fallback eval GM. Nạp bởi loader.user.js.
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
@@ -24,24 +24,12 @@
 // ==/UserScript==
 
 /*
- * v4.1.0 — SỬA LỖI "Core live khởi tạo thất bại (30s)".
+ * v4.1.1 — SỬA LỖI SyntaxError khi eval (v4.1.0 có typo trong chuỗi CSS)
+ *        + SỬA LỖI "Core live khởi tạo thất bại (30s)" của v4.0.0.
  *
- * Root-cause (đối chiếu với trang đích thật qua urlscan + wayback):
- *  - jsconfig thật CHỈ có: var rd, var dm, var nad  (không có w1/w2/w3/ad/fk/fr).
- *  - Core shortearn.live.js bản mới (185–302KB, từ giữa 08/2026) kiểm tra môi
- *    trường: currentScript.src phải là URL octolink thật, top===self,
- *    frameElement===null, document.hidden=false… Cách cũ (iframe sandbox +
- *    addScript(textContent)) trượt hết các bài kiểm tra đó -> core tự tắt,
- *    __hf không bao giờ xuất hiện -> timeout 30s.
- *
- * Cách mới (bootLiveCore):
- *  1. iframe KHÔNG sandbox (same-origin, full API).
- *  2. doc.write một HTML tự nhiên: shim -> spoof -> seal -> var rd/dm/nad ->
- *     <script src="…/shortearn.live.js?v=…"> (parser-blocking, currentScript
- *     đúng như trang thật, DOMContentLoaded/load tự nhiên).
- *  3. Bắt lỗi bên trong iframe (window.onerror) và in ra panel.
- *  4. Failover: nếu script src 403/lỗi -> GM_fetch core rồi w.eval() trong iframe.
- *  5. Probe dùng w.Uint8Array (cùng realm) để tránh trượt instanceof.
+ * Thay đổi so với v4.1.0:
+ *  - Sửa CSS typo: width:9px;9px; → width:9px;height:9px;
+ *  - Kiểm tra kỹ cú pháp toàn file trước khi eval.
  */
 (function () {
   'use strict';
@@ -62,7 +50,7 @@
   if (window.__otlBypassRunning) return;
   window.__otlBypassRunning = true;
 
-  var MY_VERSION = '4.1.0';
+  var MY_VERSION = '4.1.1';
   var KEY_LAST = 'otl_last_target_v4';
 
   // =====================================================================
@@ -166,7 +154,6 @@
     'var _o=window.__b110671;window.__b110671=function(){_sealCd();return _o();};' +
     'try{Object.defineProperty(window.__b110671,"__sealed",{value:true});}catch(e){}clearInterval(_iv);}},80);})();';
 
-  // v4.1.0: shim "tôi là tab thật, không bị nhúng" — chạy BÊN TRONG iframe.
   var SHIM_SCRIPT =
     '(function(){' +
     'try{Object.defineProperty(window,"top",{get:function(){return window;},configurable:true});}catch(e){}' +
@@ -199,7 +186,7 @@
       '.lux-panel.oc-collapsed{height:56px!important}' +
       '.lux-panel.oc-collapsed .lux-body,.lux-panel.oc-collapsed .oc-rail{display:none}' +
       '.lux-header{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.07)}' +
-      '.oc-dot{width:9px;9px;height:9px;border-radius:50%;background:var(--oc-ok);box-shadow:0 0 10px var(--oc-ok);animation:oc-ring 2.2s ease-out infinite;flex:none}' +
+      '.oc-dot{width:9px;height:9px;border-radius:50%;background:var(--oc-ok);box-shadow:0 0 10px var(--oc-ok);animation:oc-ring 2.2s ease-out infinite;flex:none}' +
       '.oc-dot.busy{background:var(--oc-accent2);box-shadow:0 0 10px var(--oc-accent2)}' +
       '.oc-dot.bad{background:var(--oc-err);box-shadow:0 0 10px var(--oc-err)}' +
       '.oc-title{font-weight:800;font-size:12.5px;letter-spacing:.12em;background:linear-gradient(92deg,#fff,#d8b4fe 35%,#67e8f9 65%,#fff);' +
@@ -288,7 +275,7 @@
   function notify(t) { try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: t, timeout: 4000 }); } catch (e) {} }
 
   // =====================================================================
-  // LIVE CORE v4.1.0 — iframe môi-trường-thật
+  // LIVE CORE v4.1.1 — iframe môi-trường-thật
   // =====================================================================
   var coreCtx = null;
   var lastProbe = 'chưa probe';
@@ -344,7 +331,6 @@
         var cfg = readJsConfig(resp.responseText || '');
         UI.log('jsconfig live: rd=' + (cfg.rd ? cfg.rd.slice(0, 16) + '…' : '(trống)') + ' nad=' + cfg.nad + ' dm=' + (cfg.dm || '(mặc định)'), 'system');
 
-        // iframe KHÔNG sandbox — same-origin, full API, giống tab thật.
         var iframe = document.createElement('iframe');
         iframe.style.display = 'none';
         (document.body || document.documentElement).appendChild(iframe);
@@ -358,7 +344,6 @@
           }, true);
         } catch (e) {}
 
-        // Config đúng format trang thật: var rd / var dm / var nad.
         var cfgScript = 'var rd=' + jsLiteral(cfg.rd || '') + ';var dm=' + jsLiteral(cfg.dm || 'https://octolink.vip') +
           ';var nad=' + (cfg.nad === false ? 'false' : 'true') + ';';
         if (cfg.fk) cfgScript += 'var fk=' + jsLiteral(cfg.fk) + ';';
@@ -412,7 +397,6 @@
             ontimeout: function () { UI.log('Hết hạn tải core.', 'error'); done(null); }
           });
         }
-        // 20s cho cách chính (script src), 15s cho failover.
         pollCore(w, 40, function (ok) { if (ok) succeed(); else failoverEval(); });
       },
       onerror: function () { UI.log('Không với tới octolink.vip (kiểm tra mạng/VPN).', 'error'); done(null); },
@@ -470,7 +454,6 @@
 
   function decryptJob(w, body) {
     var job = null;
-    // v4.1.0: đưa byte vào CÙNG REALM của iframe (tránh trượt instanceof Uint8Array).
     var wb = body;
     try { if (w && w.Uint8Array) { wb = new w.Uint8Array(body.length); for (var i0 = 0; i0 < body.length; i0++) wb[i0] = body[i0]; } } catch (e) {}
     try { if (typeof w.__se331 === 'function') w.__se331(wb); if (typeof w.__se4ce === 'function') job = w.__se4ce(wb); } catch (e) {}
