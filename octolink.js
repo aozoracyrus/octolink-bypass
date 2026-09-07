@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         OctoLink Bypass Core — aozoracyrus fork
 // @namespace    https://github.com/aozoracyrus/octolink-bypass
-// @version      4.0.0
-// @description  Lõi bypass: giao thức 4 chặng /check/continue với LIVE CORE từ octolink.vip (không lõi nhúng stale — sửa 404 /finish/), fingerprint spoof chống phát hiện. Nạp bởi loader.user.js.
+// @version      4.1.0
+// @description  Lõi bypass: giao thức 4 chặng /check/continue với LIVE CORE từ octolink.vip — iframe môi-trường-thật (script src thật, không sandbox, shim top/frameElement, đủ rd/dm/nad), fallback eval GM. Nạp bởi loader.user.js.
 // @author       aozoracyrus (gốc: Chodenocto)
 // @match        *://minuc.vn/*
 // @match        *://linkhuongdan.online/*
@@ -24,23 +24,24 @@
 // ==/UserScript==
 
 /*
- * v4.0.0 — lõi bypass (fork aozoracyrus, đọc kĩ octolink.js gốc rồi viết gọn).
+ * v4.1.0 — SỬA LỖI "Core live khởi tạo thất bại (30s)".
  *
- * KIẾN TRÚC ĐÚNG (từ source gốc của Chodenocto):
- *  - Guard signature / mã hoá response KHÔNG phải của tool — là core của
- *    CHÍNH octolink: /js/shortearn.live.js + /statics/jsconfig.js chạy
- *    trong iframe sandbox, expose __hf / __b110671 / __se4ce.
- *  - Bản gốc nhúng lõi gzip dự phòng; lõi đó STALE dần -> giải mã lệch ->
- *    server từ chối -> 404 /finish/. Fork LUÔN boot live core -> luôn khớp.
+ * Root-cause (đối chiếu với trang đích thật qua urlscan + wayback):
+ *  - jsconfig thật CHỈ có: var rd, var dm, var nad  (không có w1/w2/w3/ad/fk/fr).
+ *  - Core shortearn.live.js bản mới (185–302KB, từ giữa 08/2026) kiểm tra môi
+ *    trường: currentScript.src phải là URL octolink thật, top===self,
+ *    frameElement===null, document.hidden=false… Cách cũ (iframe sandbox +
+ *    addScript(textContent)) trượt hết các bài kiểm tra đó -> core tự tắt,
+ *    __hf không bao giờ xuất hiện -> timeout 30s.
  *
- * FLOW:
- *  1. Panel hiện, nhận diện mã nhiệm vụ, bắt nhập "tên miền đích".
- *  2. Boot live core -> POST /check/job (binary + x-guard-sig + cookie jar).
- *  3. 4 chặng: đếm ngược -> POST /check/continue -> giải mã job.
- *     'success' -> chặng kế · 'wait' -> nghỉ theo server · 'finish' ->
- *     "Mở khóa thành công!" -> {domain}/?redirect_to_octo={finishURL}
- *     -> captcha octolink -> link gốc.
- *  4. Lưới an toàn: /finish/ 404 -> recovery + form chạy lại.
+ * Cách mới (bootLiveCore):
+ *  1. iframe KHÔNG sandbox (same-origin, full API).
+ *  2. doc.write một HTML tự nhiên: shim -> spoof -> seal -> var rd/dm/nad ->
+ *     <script src="…/shortearn.live.js?v=…"> (parser-blocking, currentScript
+ *     đúng như trang thật, DOMContentLoaded/load tự nhiên).
+ *  3. Bắt lỗi bên trong iframe (window.onerror) và in ra panel.
+ *  4. Failover: nếu script src 403/lỗi -> GM_fetch core rồi w.eval() trong iframe.
+ *  5. Probe dùng w.Uint8Array (cùng realm) để tránh trượt instanceof.
  */
 (function () {
   'use strict';
@@ -51,7 +52,6 @@
   var isOcto = matchHost(host, 'octolink.vip');
   var isGuideHost = matchHost(host, 'linkhuongdan.online') || matchHost(host, 'totreview.com') || matchHost(host, 'minuc.vn');
 
-  // trang captcha /finish/ chuẩn: không can thiệp (404 thì cứu)
   var isFinish = isOcto && /^\/+finish(\/|$)/i.test(path);
   function is404Page() {
     var t = (document.title || '') + ' ' + (document.body ? (document.body.innerText || '').slice(0, 300) : '');
@@ -62,11 +62,11 @@
   if (window.__otlBypassRunning) return;
   window.__otlBypassRunning = true;
 
-  var MY_VERSION = '4.0.0';
+  var MY_VERSION = '4.1.0';
   var KEY_LAST = 'otl_last_target_v4';
 
   // =====================================================================
-  // GM API + safeRequest (GM_xmlhttpRequest -> fetch fallback)
+  // GM API + safeRequest
   // =====================================================================
   function gm(n) { return (typeof GM !== 'undefined' && GM && typeof GM[n] === 'function') ? GM[n].bind(GM) : undefined; }
   var gGet = typeof GM_getValue === 'function' ? GM_getValue : gm('getValue');
@@ -74,7 +74,7 @@
   var gClip = typeof GM_setClipboard === 'function' ? GM_setClipboard : gm('setClipboard');
   var gNoti = typeof GM_notification === 'function' ? GM_notification : gm('notification');
   var gMenu = typeof GM_registerMenuCommand === 'function' ? GM_registerMenuCommand : gm('registerMenuCommand');
-  function storeGet(k, f) { try { var v = gGet ? gGet(k, f) : f; return (v == null) ? f : v; } catch (e) { return f; } }
+  function storeGet(k, f) { try { var v = gGet ? gGet(k, f); return (v == null) ? f : v; } catch (e) { return f; } }
   function storeSet(k, v) { try { if (gSet) gSet(k, v); } catch (e) {} }
 
   function safeRequest(opts) {
@@ -102,7 +102,6 @@
     else fallback();
   }
 
-  // cookie jar thủ công (set-cookie từ GM request)
   var cookieJar = { from_google: 'true' }, cookieHeader = '';
   function collectCookies(rawHeaders) {
     if (!rawHeaders) return;
@@ -116,7 +115,7 @@
   }
 
   // =====================================================================
-  // FINGERPRINT THẬT + SPOOF (verbatim từ bản gốc)
+  // FINGERPRINT THẬT + SPOOF
   // =====================================================================
   var REAL_UA = ''; try { REAL_UA = String(navigator.userAgent || ''); } catch (e) {}
   var USER_AGENT = REAL_UA || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36';
@@ -156,7 +155,6 @@
       'document.cookie="from_google=true; path=/";}catch(e){}}catch(e){}})();';
   }
 
-  // Giấu vết userscript khỏi fingerprint của core octolink
   var SEAL_SCRIPT = '(function(){function _sealCd(){try{var d=window.directjscd;if(!d||typeof d!=="object")return;' +
     'try{if(d.userscript!==undefined)d.userscript=0;}catch(e){}try{if("userscript_score"in d&&d.userscript_score)d.userscript_score=0;}catch(e){}' +
     'try{if(d.gm_apis)d.gm_apis=false;}catch(e){}try{if(d.extension_runtime)d.extension_runtime=false;}catch(e){}' +
@@ -168,8 +166,20 @@
     'var _o=window.__b110671;window.__b110671=function(){_sealCd();return _o();};' +
     'try{Object.defineProperty(window.__b110671,"__sealed",{value:true});}catch(e){}clearInterval(_iv);}},80);})();';
 
+  // v4.1.0: shim "tôi là tab thật, không bị nhúng" — chạy BÊN TRONG iframe.
+  var SHIM_SCRIPT =
+    '(function(){' +
+    'try{Object.defineProperty(window,"top",{get:function(){return window;},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(window,"parent",{get:function(){return window;},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(window,"frameElement",{get:function(){return null;},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(window,"opener",{get:function(){return null;},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(document,"hidden",{get:function(){return false;},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(document,"visibilityState",{get:function(){return "visible";},configurable:true});}catch(e){}' +
+    'try{Object.defineProperty(document,"hasFocus",{value:function(){return true;},configurable:true});}catch(e){}' +
+    '})();';
+
   // =====================================================================
-  // UI — panel log tím/cyan giống bản gốc, rebrand aozoracyrus
+  // UI
   // =====================================================================
   var UI = null;
   function initUI() {
@@ -189,7 +199,7 @@
       '.lux-panel.oc-collapsed{height:56px!important}' +
       '.lux-panel.oc-collapsed .lux-body,.lux-panel.oc-collapsed .oc-rail{display:none}' +
       '.lux-header{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid rgba(255,255,255,.07)}' +
-      '.oc-dot{width:9px;height:9px;border-radius:50%;background:var(--oc-ok);box-shadow:0 0 10px var(--oc-ok);animation:oc-ring 2.2s ease-out infinite;flex:none}' +
+      '.oc-dot{width:9px;9px;height:9px;border-radius:50%;background:var(--oc-ok);box-shadow:0 0 10px var(--oc-ok);animation:oc-ring 2.2s ease-out infinite;flex:none}' +
       '.oc-dot.busy{background:var(--oc-accent2);box-shadow:0 0 10px var(--oc-accent2)}' +
       '.oc-dot.bad{background:var(--oc-err);box-shadow:0 0 10px var(--oc-err)}' +
       '.oc-title{font-weight:800;font-size:12.5px;letter-spacing:.12em;background:linear-gradient(92deg,#fff,#d8b4fe 35%,#67e8f9 65%,#fff);' +
@@ -278,14 +288,47 @@
   function notify(t) { try { if (gNoti) gNoti({ title: 'OctoLink Bypass', text: t, timeout: 4000 }); } catch (e) {} }
 
   // =====================================================================
-  // LIVE CORE — shortearn.live.js + jsconfig.js trong iframe sandbox
+  // LIVE CORE v4.1.0 — iframe môi-trường-thật
   // =====================================================================
   var coreCtx = null;
+  var lastProbe = 'chưa probe';
 
   function readJsConfig(text) {
     function num(name) { var m = text.match(new RegExp('(?:var\\s+)?' + name + '\\s*=\\s*(\\d+)')); return m ? parseInt(m[1], 10) : null; }
     function str(name) { var m = text.match(new RegExp('var\\s+' + name + '\\s*=\\s*"([^"]*)"')); return m ? m[1] : null; }
-    return { rd: str('rd') || '', w1: num('w1'), w2: num('w2'), w3: num('w3'), ad: num('ad'), dm: str('dm'), fk: str('fk'), fr: str('fr') };
+    function bool(name) { var m = text.match(new RegExp('var\\s+' + name + '\\s*=\\s*(true|false)')); return m ? m[1] === 'true' : null; }
+    return { rd: str('rd') || '', dm: str('dm') || '', fk: str('fk'), fr: str('fr'),
+      nad: bool('nad'), w1: num('w1'), w2: num('w2'), w3: num('w3'), ad: num('ad') };
+  }
+
+  function probeCore(w) {
+    try {
+      if (typeof w.__hf === 'function') {
+        var sig = w.__hf('/check/job', new w.Uint8Array(0));
+        if (sig && typeof sig['x-guard-sig'] === 'string' && sig['x-guard-sig'].length > 0) { lastProbe = 'ready'; return 'ready'; }
+        lastProbe = 'có __hf nhưng sig hỏng'; return 'bad-sig';
+      }
+      lastProbe = 'chưa có __hf';
+    } catch (e) { lastProbe = 'probe lỗi: ' + (e && e.message ? e.message : e); }
+    return 'loading';
+  }
+
+  function pollCore(w, maxTicks, onDone) {
+    var t = 0;
+    var iv = setInterval(function () {
+      t++;
+      var s = probeCore(w);
+      if (s === 'ready') { clearInterval(iv); onDone(true); }
+      else if (t >= maxTicks) { clearInterval(iv); onDone(false); }
+    }, 500);
+  }
+
+  function diagCore(w) {
+    var miss = [];
+    ['__hf', '__b110671', '__se4ce', '__se331'].forEach(function (n) {
+      try { if (typeof w[n] !== 'function') miss.push(n); } catch (e) { miss.push(n); }
+    });
+    UI.log('diag: thiếu [' + (miss.join(', ') || 'không') + '] · ' + lastProbe, 'warn');
   }
 
   function bootLiveCore(done) {
@@ -299,63 +342,78 @@
         collectCookies(resp.responseHeaders);
         UI.log('Mạng OK → octolink.vip/statics/jsconfig.js (' + resp.status + ', ' + (Date.now() - t0) + 'ms)', 'detect');
         var cfg = readJsConfig(resp.responseText || '');
-        UI.log('jsconfig live: rd=' + (cfg.rd ? cfg.rd.slice(0, 16) + '…' : '(trống)') + ' w=' + [cfg.w1, cfg.w2, cfg.w3].join('/'), 'system');
-        safeRequest({
-          method: 'GET', url: 'https://octolink.vip/js/shortearn.live.js?v=' + Date.now(), timeout: 20000,
-          headers: { accept: '*/*', referer: 'https://octolink.vip/', 'user-agent': USER_AGENT },
-          onload: function (coreResp) {
-            collectCookies(coreResp.responseHeaders);
-            var src = coreResp.responseText || '';
-            if (src.length < 200) { UI.log('Core live rỗng (' + src.length + 'B).', 'error'); return done(null); }
-            UI.log('Đã nạp core live (' + Math.round(src.length / 1024) + 'KB) — mã hoá luôn khớp server.', 'success');
+        UI.log('jsconfig live: rd=' + (cfg.rd ? cfg.rd.slice(0, 16) + '…' : '(trống)') + ' nad=' + cfg.nad + ' dm=' + (cfg.dm || '(mặc định)'), 'system');
 
-            var iframe = document.createElement('iframe');
-            iframe.style.display = 'none';
-            iframe.setAttribute('sandbox', 'allow-scripts allow-same-origin');
-            document.body.appendChild(iframe);
-            var w = iframe.contentWindow;
-            try { if (!w || !w.document) throw new Error('blocked'); } catch (e) {
-              UI.log('Không truy cập được iframe core trên trình duyệt này.', 'error'); return done(null);
-            }
-            try {
-              w.rd = cfg.rd; w.ad = cfg.ad != null ? cfg.ad : 5;
-              w.w1 = cfg.w1 != null ? cfg.w1 : 59; w.w2 = cfg.w2 != null ? cfg.w2 : 17; w.w3 = cfg.w3 != null ? cfg.w3 : 13;
-              w.__OCTO_UA = USER_AGENT;
-              w.dm = cfg.dm || 'https://octolink.vip'; w.fk = cfg.fk || ''; w.fr = cfg.fr || '';
-            } catch (e) {}
-            var doc = w.document;
-            doc.open(); doc.write('<!DOCTYPE html><html><head></head><body></body></html>'); doc.close();
-            function addScript(text) { var s = doc.createElement('script'); s.textContent = text; doc.body.appendChild(s); }
-            addScript(buildSpoofScript());
-            addScript(SEAL_SCRIPT);
-            addScript(src);
+        // iframe KHÔNG sandbox — same-origin, full API, giống tab thật.
+        var iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        (document.body || document.documentElement).appendChild(iframe);
+        var w = iframe.contentWindow;
+        try { if (!w || !w.document) throw new Error('blocked'); } catch (e) {
+          UI.log('Không truy cập được iframe core trên trình duyệt này.', 'error'); return done(null);
+        }
+        try {
+          w.addEventListener('error', function (ev) {
+            try { UI.log('Lõi iframe ném lỗi: ' + (ev && ev.message ? ev.message : '?') + ' (dòng ' + (ev && ev.lineno ? ev.lineno : '?') + ')', 'error'); } catch (e2) {}
+          }, true);
+        } catch (e) {}
 
-            var ticks = 0;
-            var timer = setInterval(function () {
-              ticks++;
-              var ready = false;
-              try {
-                if (typeof w.__hf === 'function') {
-                  var sig = w.__hf('/check/job', new Uint8Array(0));
-                  ready = !!(sig && typeof sig['x-guard-sig'] === 'string' && sig['x-guard-sig'].length > 0);
-                }
-              } catch (e) {}
-              if (ready) {
-                clearInterval(timer);
-                coreCtx = { rd: cfg.rd, w: w };
-                UI.log('Fingerprint thật đã sẵn sàng.', 'success');
-                UI.log('Core live sẵn sàng.', 'success');
-                done(coreCtx);
-              } else if (ticks > 60) {
-                clearInterval(timer);
-                UI.log('Core live khởi tạo thất bại (30s).', 'error');
-                done(null);
+        // Config đúng format trang thật: var rd / var dm / var nad.
+        var cfgScript = 'var rd=' + jsLiteral(cfg.rd || '') + ';var dm=' + jsLiteral(cfg.dm || 'https://octolink.vip') +
+          ';var nad=' + (cfg.nad === false ? 'false' : 'true') + ';';
+        if (cfg.fk) cfgScript += 'var fk=' + jsLiteral(cfg.fk) + ';';
+        if (cfg.fr) cfgScript += 'var fr=' + jsLiteral(cfg.fr) + ';';
+        if (cfg.w1 != null) cfgScript += 'var w1=' + cfg.w1 + ';';
+        if (cfg.w2 != null) cfgScript += 'var w2=' + cfg.w2 + ';';
+        if (cfg.w3 != null) cfgScript += 'var w3=' + cfg.w3 + ';';
+
+        var coreUrl = 'https://octolink.vip/js/shortearn.live.js?v=' + Date.now();
+        var doc = w.document;
+        doc.open();
+        doc.write('<!DOCTYPE html><html><head></head><body>' +
+          '<script>' + SHIM_SCRIPT + '<\/script>' +
+          '<script>' + buildSpoofScript() + '<\/script>' +
+          '<script>' + SEAL_SCRIPT + '<\/script>' +
+          '<script>' + cfgScript + '<\/script>' +
+          '<script src="' + coreUrl + '"><\/script>' +
+          '</body></html>');
+        doc.close();
+        UI.log('Đã dựng iframe core: script src thật, không sandbox, shim top/frameElement.', 'system');
+
+        var settled = false;
+        function succeed() {
+          if (settled) return; settled = true;
+          coreCtx = { rd: cfg.rd, w: w };
+          UI.log('Fingerprint thật đã sẵn sàng.', 'success');
+          UI.log('Core live sẵn sàng.', 'success');
+          done(coreCtx);
+        }
+        function failoverEval() {
+          if (settled) return;
+          UI.log('Script src không khởi tạo được core — thử GM_fetch + eval trong iframe…', 'warn');
+          safeRequest({
+            method: 'GET', url: coreUrl, timeout: 20000,
+            headers: { accept: '*/*', referer: 'https://octolink.vip/', 'user-agent': USER_AGENT },
+            onload: function (r2) {
+              collectCookies(r2.responseHeaders);
+              var src = r2.responseText || '';
+              if (src.length < 200) { UI.log('Core live rỗng (' + src.length + 'B).', 'error'); diagCore(w); return done(null); }
+              UI.log('Đã nạp core live (' + Math.round(src.length / 1024) + 'KB) — eval trong iframe.', 'success');
+              try { w.eval(src); } catch (e) {
+                UI.log('Lõi ném lỗi khi eval: ' + (e && e.message ? e.message : e), 'error');
               }
-            }, 500);
-          },
-          onerror: function () { UI.log('Không tải được shortearn.live.js.', 'error'); done(null); },
-          ontimeout: function () { UI.log('Hết hạn tải core.', 'error'); done(null); }
-        });
+              pollCore(w, 30, function (ok) {
+                if (ok) return succeed();
+                UI.log('Core live khởi tạo thất bại (cả 2 cách).', 'error');
+                diagCore(w); done(null);
+              });
+            },
+            onerror: function () { UI.log('Không tải được shortearn.live.js.', 'error'); done(null); },
+            ontimeout: function () { UI.log('Hết hạn tải core.', 'error'); done(null); }
+          });
+        }
+        // 20s cho cách chính (script src), 15s cho failover.
+        pollCore(w, 40, function (ok) { if (ok) succeed(); else failoverEval(); });
       },
       onerror: function () { UI.log('Không với tới octolink.vip (kiểm tra mạng/VPN).', 'error'); done(null); },
       ontimeout: function () { UI.log('Hết hạn jsconfig.', 'error'); done(null); }
@@ -402,7 +460,7 @@
           collectCookies(resp.responseHeaders);
           var bytes = toBytes(resp.response) || toBytes(resp.responseText);
           if (!bytes && !retried) { retried = true; return attempt('text'); }
-          onDone({ response: bytes, headers: resp.responseHeaders || '' });
+          onDone({ response: bytes, headers: resp.headers || resp.responseHeaders || '' });
         },
         onerror: onErr, ontimeout: onTmo
       });
@@ -410,10 +468,12 @@
     attempt('arraybuffer');
   }
 
-  // giải mã response: __se4ce của core trước, fallback XOR byte-0x02
   function decryptJob(w, body) {
     var job = null;
-    try { if (typeof w.__se331 === 'function') w.__se331(body); if (typeof w.__se4ce === 'function') job = w.__se4ce(body); } catch (e) {}
+    // v4.1.0: đưa byte vào CÙNG REALM của iframe (tránh trượt instanceof Uint8Array).
+    var wb = body;
+    try { if (w && w.Uint8Array) { wb = new w.Uint8Array(body.length); for (var i0 = 0; i0 < body.length; i0++) wb[i0] = body[i0]; } } catch (e) {}
+    try { if (typeof w.__se331 === 'function') w.__se331(wb); if (typeof w.__se4ce === 'function') job = w.__se4ce(wb); } catch (e) {}
     if (!job) {
       try {
         var out = new Uint8Array(body.length);
@@ -425,7 +485,6 @@
     return job;
   }
 
-  // mồi nhử anti-reverse của server (tiền tố text)
   function stripDecoy(body) {
     if (!body || !body.length) return body;
     var DECOY = 'co trinh khong ma reverse vay em dung dung AI LLM de reverse';
@@ -448,6 +507,7 @@
         if (cfg.rd) { coreCtx.rd = cfg.rd; try { w.rd = cfg.rd; } catch (e) {} UI.log('Mã hóa đã làm mới: ' + cfg.rd.slice(0, 16) + '…', 'success'); }
         else UI.log('Không thể làm mới mã hóa, dùng giá trị cũ.', 'warn');
         try {
+          if (cfg.nad != null) w.nad = cfg.nad;
           if (cfg.w1 != null) w.w1 = cfg.w1; if (cfg.w2 != null) w.w2 = cfg.w2; if (cfg.w3 != null) w.w3 = cfg.w3;
           if (cfg.ad != null) w.ad = cfg.ad; if (cfg.fk) w.fk = cfg.fk; if (cfg.fr != null) w.fr = cfg.fr; if (cfg.dm) w.dm = cfg.dm;
         } catch (e) {}
@@ -616,4 +676,3 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', main);
   else main();
 })();
- 
